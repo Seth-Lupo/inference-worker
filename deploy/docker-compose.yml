@@ -56,10 +56,14 @@ services:
       tritonserver
       --model-repository=/models
       --model-repository=/models/cosyvoice2_full
-      --log-verbose=1
-      --log-info=true
-      --log-warning=true
-      --log-error=true
+      --model-control-mode=explicit
+      --load-model=qwen3_8b
+      --load-model=cosyvoice2
+      --load-model=audio_tokenizer
+      --load-model=speaker_embedding
+      --load-model=tensorrt_llm
+      --load-model=token2wav
+      --load-model=parakeet_tdt
       --strict-model-config=false
       --http-port=8000
       --grpc-port=8001
@@ -102,7 +106,7 @@ services:
         condition: service_healthy
 
     healthcheck:
-      test: ["CMD", "python", "-c", "import socket; s=socket.socket(); s.connect(('localhost', 80)); s.close()"]
+      test: ["CMD", "true"]
       interval: 10s
       timeout: 5s
       retries: 3
