@@ -1,15 +1,16 @@
-# Custom Triton image with TensorRT-LLM + Python dependencies for ASR/TTS
-FROM nvcr.io/nvidia/tritonserver:24.12-trtllm-python-py3
+# Custom Triton image with TensorRT-LLM 1.2.0rc6 + Python dependencies
+# Using the TRT-LLM release container which includes Triton server
+FROM nvcr.io/nvidia/tensorrt-llm/release:1.2.0rc6
 
 # Install Python packages for Parakeet ASR and CosyVoice TTS
 RUN pip install --no-cache-dir \
     sherpa-onnx \
     onnxruntime-gpu \
     numpy \
-    torch \
-    torchaudio \
     transformers \
     sentencepiece
 
-# The TRT-LLM image already has the tensorrtllm backend
-# Python backend is also included for custom model wrappers
+# The TRT-LLM release container includes:
+# - TensorRT-LLM 1.2.0rc6 (matches our built engines)
+# - Triton Inference Server with tensorrtllm backend
+# - Python backend for custom model wrappers
