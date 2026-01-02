@@ -36,7 +36,7 @@ services:
     volumes:
       # Model repository (parakeet_tdt, qwen3_8b)
       # Note: silero_vad runs locally in worker, not in Triton
-      - ./model_repository:/models:ro
+      - ./model_repository:/models:rw
       # Mount built Qwen3 TensorRT-LLM engine
       - ./qwen3_build/engine_int4:/models/qwen3_8b/1/engine:ro
       # Mount CosyVoice2 full model repo (5 models with Python backends)
