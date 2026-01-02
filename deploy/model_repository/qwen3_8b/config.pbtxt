@@ -108,6 +108,11 @@ parameters {
 }
 
 parameters {
+  key: "guided_decoding_backend"
+  value: { string_value: "xgrammar" }
+}
+
+parameters {
   key: "max_tokens_in_paged_kv_cache"
   value: { string_value: "8192" }
 }

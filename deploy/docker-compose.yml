@@ -41,7 +41,8 @@ services:
       - ./qwen3_build/engine_int4_awq:/models/qwen3_8b/1/engine:ro
       # Mount CosyVoice2 full model repo (5 models with Python backends)
       # Built by: ./scripts/build_cosyvoice.sh -1 2
-      - ./model_repository/cosyvoice2_full:/models/cosyvoice2_full:ro
+      # Note: rw needed for TensorRT engine caching
+      - ./model_repository/cosyvoice2_full:/models/cosyvoice2_full:rw
       # Engine cache
       - ./engine_cache:/engine_cache
       # Logs

@@ -506,6 +506,11 @@ parameters {
 }
 
 parameters {
+  key: "guided_decoding_backend"
+  value: { string_value: "xgrammar" }
+}
+
+parameters {
   key: "batch_scheduler_policy"
   value: { string_value: "max_utilization" }
 }
