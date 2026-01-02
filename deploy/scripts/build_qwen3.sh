@@ -24,7 +24,7 @@ log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
 # Container configuration
 # Use dedicated TensorRT-LLM development container (NOT tritonserver which is serving-only)
-TRTLLM_IMAGE="nvcr.io/nvidia/tensorrt-llm/release:0.16.0"
+TRTLLM_IMAGE="nvcr.io/nvidia/tensorrt-llm/release:1.2.0rc6"
 TRTLLM_CONTAINER_NAME="trtllm-builder-qwen3"
 
 # Load environment

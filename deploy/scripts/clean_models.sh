@@ -26,7 +26,7 @@ CLEAN_IMAGES=false
 CLEAN_MODEL=""
 
 # TensorRT-LLM development image (~20GB)
-TRTLLM_IMAGE="nvcr.io/nvidia/tensorrt-llm/release:0.16.0"
+TRTLLM_IMAGE="nvcr.io/nvidia/tensorrt-llm/release:1.2.0rc6"
 
 show_help() {
     echo "Usage: $0 [OPTIONS]"
