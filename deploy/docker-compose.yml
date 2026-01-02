@@ -23,7 +23,7 @@ services:
               capabilities: [gpu]
 
     # Shared memory for TensorRT-LLM
-    shm_size: "4g"
+    shm_size: "8g"
     ulimits:
       memlock: -1
       stack: 67108864
