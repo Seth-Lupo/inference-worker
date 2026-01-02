@@ -14,7 +14,19 @@ RUN pip install --no-cache-dir \
         transformers \
         sentencepiece \
         hyperpyyaml \
-        s3tokenizer
+        s3tokenizer \
+        conformer \
+        diffusers \
+        onnx \
+        openai-whisper \
+        wget
+
+# Install CosyVoice and Matcha-TTS from source
+RUN git clone --recursive https://github.com/FunAudioLLM/CosyVoice.git /opt/CosyVoice && \
+    cd /opt/CosyVoice && \
+    pip install --no-cache-dir -e . && \
+    cd third_party/Matcha-TTS && \
+    pip install --no-cache-dir -e .
 
 # Triton 25.12-trtllm-python-py3 includes:
 # - TensorRT-LLM 1.0.0+ (Qwen3 TensorRT engine support)

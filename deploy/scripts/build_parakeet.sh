@@ -46,6 +46,8 @@ download_from_huggingface() {
     HF_REPO="onnx-community/parakeet-tdt-0.6b-v2-ONNX"
     HF_BASE="https://huggingface.co/${HF_REPO}/resolve/main"
 
+    # Clean up any existing directory
+    rm -rf "${WORK_DIR}/parakeet_onnx"
     mkdir -p "${WORK_DIR}/parakeet_onnx"
 
     # Direct download via curl/wget (no CLI needed)
@@ -113,12 +115,19 @@ download_from_sherpa() {
 
     DOWNLOAD_URL="${SHERPA_BASE}/${VERSION}/${ARCHIVE}"
 
-    if [ ! -f "${WORK_DIR}/${ARCHIVE}" ]; then
-        log_info "Downloading ${ARCHIVE}..."
-        curl -L -o "${WORK_DIR}/${ARCHIVE}" "${DOWNLOAD_URL}" || {
-            log_warn "Could not download from sherpa-onnx"
-            return 1
-        }
+    # Always re-download to ensure we have the right file
+    rm -f "${WORK_DIR}/${ARCHIVE}"
+    log_info "Downloading ${ARCHIVE}..."
+    if ! curl -L -f -o "${WORK_DIR}/${ARCHIVE}" "${DOWNLOAD_URL}"; then
+        log_warn "Could not download from sherpa-onnx"
+        return 1
+    fi
+
+    # Verify it's actually a bzip2 file
+    if ! file "${WORK_DIR}/${ARCHIVE}" | grep -q "bzip2"; then
+        log_warn "Downloaded file is not a valid bzip2 archive"
+        rm -f "${WORK_DIR}/${ARCHIVE}"
+        return 1
     fi
 
     # Extract
