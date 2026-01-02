@@ -98,6 +98,11 @@ parameters {
 }
 
 parameters {
+  key: "tokenizer_dir"
+  value: { string_value: "/models/qwen3_8b/1/tokenizer" }
+}
+
+parameters {
   key: "max_tokens_in_paged_kv_cache"
   value: { string_value: "8192" }
 }

@@ -8,7 +8,10 @@ RUN pip install --no-cache-dir \
     onnxruntime-gpu \
     numpy \
     transformers \
-    sentencepiece
+    sentencepiece \
+    torchaudio \
+    hyperpyyaml \
+    s3tokenizer
 
 # Triton 25.12-trtllm-python-py3 includes:
 # - TensorRT-LLM 1.0.0+ (Qwen3 TensorRT engine support)

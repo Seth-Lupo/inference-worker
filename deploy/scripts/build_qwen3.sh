@@ -303,8 +303,6 @@ build_engine() {
             echo \"TRT-LLM version: \${TRTLLM_VERSION}\"
 
             echo '=== Installing dependencies ==='
-            # Note: Container's torch version limits transformers version
-            # Qwen2.5 works with container's transformers, Qwen3 needs newer torch
             pip install -q accelerate sentencepiece 2>/dev/null || true
 
             echo \"=== Cloning TRT-LLM examples (v\${TRTLLM_VERSION}) ===\"
@@ -410,6 +408,16 @@ setup_triton() {
             cp -r "${ENGINE_DIR}" "${TRITON_MODEL}/1/engine"
     fi
 
+    # Copy tokenizer files from HuggingFace model
+    log_info "Copying tokenizer files..."
+    mkdir -p "${TRITON_MODEL}/1/tokenizer"
+    cp "${WORK_DIR}/${MODEL_DIR_NAME}/tokenizer"* "${TRITON_MODEL}/1/tokenizer/" 2>/dev/null || true
+    cp "${WORK_DIR}/${MODEL_DIR_NAME}/vocab"* "${TRITON_MODEL}/1/tokenizer/" 2>/dev/null || true
+    cp "${WORK_DIR}/${MODEL_DIR_NAME}/merges"* "${TRITON_MODEL}/1/tokenizer/" 2>/dev/null || true
+    cp "${WORK_DIR}/${MODEL_DIR_NAME}/special_tokens"* "${TRITON_MODEL}/1/tokenizer/" 2>/dev/null || true
+    cp "${WORK_DIR}/${MODEL_DIR_NAME}/config.json" "${TRITON_MODEL}/1/tokenizer/" 2>/dev/null || true
+    cp "${WORK_DIR}/${MODEL_DIR_NAME}/generation_config.json" "${TRITON_MODEL}/1/tokenizer/" 2>/dev/null || true
+
     # Create config.pbtxt for TensorRT-LLM backend
     cat > "${TRITON_MODEL}/config.pbtxt" << 'EOF'
 name: "qwen3_8b"
@@ -485,6 +493,11 @@ parameters {
 parameters {
   key: "gpt_model_path"
   value: { string_value: "${engine_dir}" }
+}
+
+parameters {
+  key: "tokenizer_dir"
+  value: { string_value: "/models/qwen3_8b/1/tokenizer" }
 }
 
 parameters {
