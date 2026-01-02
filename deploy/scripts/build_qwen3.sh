@@ -298,17 +298,34 @@ build_engine() {
             ENGINE_DIR=/workspace/build/engine_${QUANTIZATION}
 
             echo '=== TensorRT-LLM Version Check ==='
-            python3 -c 'import tensorrt_llm; print(f\"TRT-LLM version: {tensorrt_llm.__version__}\")'
+            TRTLLM_VERSION=\$(python3 -c 'import tensorrt_llm; print(tensorrt_llm.__version__)')
+            echo \"TRT-LLM version: \$TRTLLM_VERSION\"
+
+            echo '=== Cloning TRT-LLM examples (v\$TRTLLM_VERSION) ==='
+            # Triton container has TRT-LLM runtime but not the conversion examples
+            # Clone the matching version to get convert_checkpoint.py
+            if [ ! -d '/workspace/TensorRT-LLM' ]; then
+                git clone --depth 1 --branch v\$TRTLLM_VERSION https://github.com/NVIDIA/TensorRT-LLM.git /workspace/TensorRT-LLM || \
+                git clone --depth 1 --branch release/\$TRTLLM_VERSION https://github.com/NVIDIA/TensorRT-LLM.git /workspace/TensorRT-LLM || \
+                git clone --depth 1 https://github.com/NVIDIA/TensorRT-LLM.git /workspace/TensorRT-LLM
+            fi
+
+            # Find qwen convert script (path varies by version)
+            QWEN_DIR=\$(find /workspace/TensorRT-LLM -type d -name 'qwen' | grep -E 'examples.*qwen\$' | head -1)
+            if [ -z \"\$QWEN_DIR\" ]; then
+                echo 'ERROR: Could not find qwen examples directory'
+                find /workspace/TensorRT-LLM -name 'convert_checkpoint.py' | head -5
+                exit 1
+            fi
+            echo \"Using Qwen examples from: \$QWEN_DIR\"
+            cd \$QWEN_DIR
 
             echo '=== Step 1: Converting/Quantizing model ==='
 
-            # Use TRT-LLM's convert_checkpoint command (available in 0.16.0)
-            # For Qwen models, we use the qwen conversion path
-
             if [ '${QUANTIZATION}' == 'none' ]; then
-                # No quantization - just convert checkpoint
+                # No quantization - just convert checkpoint (FP16)
                 echo 'Converting without quantization (FP16)...'
-                python3 -m tensorrt_llm.commands.convert_checkpoint \
+                python3 convert_checkpoint.py \
                     --model_dir \$MODEL_DIR \
                     --output_dir \$CHECKPOINT_DIR \
                     --dtype float16
@@ -316,7 +333,7 @@ build_engine() {
             elif [ '${QUANTIZATION}' == 'fp8' ]; then
                 # FP8 quantization (best for Hopper/Ada GPUs)
                 echo 'Quantizing to FP8...'
-                python3 -m tensorrt_llm.commands.convert_checkpoint \
+                python3 convert_checkpoint.py \
                     --model_dir \$MODEL_DIR \
                     --output_dir \$CHECKPOINT_DIR \
                     --dtype float16 \
@@ -325,18 +342,19 @@ build_engine() {
             elif [ '${QUANTIZATION}' == 'int8_sq' ]; then
                 # INT8 SmoothQuant (good balance, works on older GPUs)
                 echo 'Quantizing with INT8 SmoothQuant...'
-                python3 -m tensorrt_llm.commands.convert_checkpoint \
+                python3 convert_checkpoint.py \
                     --model_dir \$MODEL_DIR \
                     --output_dir \$CHECKPOINT_DIR \
                     --dtype float16 \
                     --smoothquant 0.5 \
+                    --per_token \
+                    --per_channel \
                     --int8_kv_cache
 
             elif [ '${QUANTIZATION}' == 'int4_awq' ]; then
                 # INT4 AWQ (smallest, good for memory-constrained)
-                # AWQ requires pre-quantized weights or calibration
                 echo 'Quantizing with INT4 AWQ...'
-                python3 -m tensorrt_llm.commands.convert_checkpoint \
+                python3 convert_checkpoint.py \
                     --model_dir \$MODEL_DIR \
                     --output_dir \$CHECKPOINT_DIR \
                     --dtype float16 \
