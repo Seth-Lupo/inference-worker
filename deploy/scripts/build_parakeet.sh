@@ -44,20 +44,52 @@ download_from_huggingface() {
     log_info "Downloading from HuggingFace ONNX Community..."
 
     HF_REPO="onnx-community/parakeet-tdt-0.6b-v2-ONNX"
+    HF_BASE="https://huggingface.co/${HF_REPO}/resolve/main"
 
-    if command -v huggingface-cli &> /dev/null; then
-        huggingface-cli download "${HF_REPO}" \
-            --local-dir "${WORK_DIR}/parakeet_onnx" \
-            --include "*.onnx" "*.txt" "*.json"
+    mkdir -p "${WORK_DIR}/parakeet_onnx"
 
+    # Direct download via curl/wget (no CLI needed)
+    log_info "Downloading ONNX files directly..."
+
+    # Main model files
+    FILES=(
+        "model.onnx"
+        "model_fp16.onnx"
+        "config.json"
+        "preprocessor_config.json"
+        "tokenizer.json"
+        "vocab.json"
+    )
+
+    DOWNLOADED=0
+    for file in "${FILES[@]}"; do
+        if curl -L -f -o "${WORK_DIR}/parakeet_onnx/${file}" "${HF_BASE}/${file}" 2>/dev/null; then
+            log_info "  Downloaded: ${file}"
+            DOWNLOADED=$((DOWNLOADED + 1))
+        fi
+    done
+
+    if [ $DOWNLOADED -gt 0 ]; then
         # Copy to model repo
         cp "${WORK_DIR}/parakeet_onnx"/*.onnx "${PARAKEET_DIR}/1/" 2>/dev/null || true
         cp "${WORK_DIR}/parakeet_onnx"/*.txt "${PARAKEET_DIR}/1/" 2>/dev/null || true
+        cp "${WORK_DIR}/parakeet_onnx"/*.json "${PARAKEET_DIR}/1/" 2>/dev/null || true
         return 0
-    else
-        log_warn "huggingface-cli not found"
-        return 1
     fi
+
+    log_warn "Direct download failed, trying git clone..."
+
+    # Fallback to git clone
+    if command -v git &> /dev/null; then
+        git lfs install 2>/dev/null || true
+        git clone --depth 1 "https://huggingface.co/${HF_REPO}" "${WORK_DIR}/parakeet_onnx" && {
+            cp "${WORK_DIR}/parakeet_onnx"/*.onnx "${PARAKEET_DIR}/1/" 2>/dev/null || true
+            cp "${WORK_DIR}/parakeet_onnx"/*.txt "${PARAKEET_DIR}/1/" 2>/dev/null || true
+            return 0
+        }
+    fi
+
+    return 1
 }
 
 # =============================================================================

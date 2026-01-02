@@ -66,36 +66,83 @@ if [ $START_STAGE -le 0 ] && [ $STOP_STAGE -ge 0 ]; then
     log_info "Stage 0: Downloading CosyVoice2-0.5B models..."
 
     # Download LLM checkpoint from HuggingFace
-    if [ ! -d "cosyvoice2_llm" ]; then
+    if [ ! -d "cosyvoice2_llm" ] || [ ! -f "cosyvoice2_llm/config.json" ]; then
         log_info "Downloading LLM from HuggingFace: ${HF_MODEL}"
-        if [ -n "$HF_TOKEN" ]; then
-            huggingface-cli download --local-dir ./cosyvoice2_llm "${HF_MODEL}" --token "$HF_TOKEN"
-        else
-            huggingface-cli download --local-dir ./cosyvoice2_llm "${HF_MODEL}"
+
+        mkdir -p cosyvoice2_llm
+
+        # Method 1: git clone (most reliable for LFS files)
+        if command -v git &> /dev/null; then
+            git lfs install 2>/dev/null || true
+
+            if [ -n "$HF_TOKEN" ]; then
+                GIT_URL="https://USER:${HF_TOKEN}@huggingface.co/${HF_MODEL}"
+            else
+                GIT_URL="https://huggingface.co/${HF_MODEL}"
+            fi
+
+            git clone --depth 1 "$GIT_URL" ./cosyvoice2_llm && log_info "LLM downloaded via git"
+        fi
+
+        # Method 2: huggingface-cli fallback
+        if [ ! -f "cosyvoice2_llm/config.json" ] && command -v huggingface-cli &> /dev/null; then
+            log_info "Trying huggingface-cli..."
+            if [ -n "$HF_TOKEN" ]; then
+                huggingface-cli download --local-dir ./cosyvoice2_llm "${HF_MODEL}" --token "$HF_TOKEN"
+            else
+                huggingface-cli download --local-dir ./cosyvoice2_llm "${HF_MODEL}"
+            fi
+        fi
+
+        if [ ! -f "cosyvoice2_llm/config.json" ]; then
+            log_error "Could not download LLM. Please install git-lfs:"
+            log_info "  sudo yum install git-lfs && git lfs install"
+            exit 1
         fi
     else
         log_info "LLM model already downloaded"
     fi
 
     # Download full model from ModelScope
-    if [ ! -d "CosyVoice2-0.5B" ]; then
+    if [ ! -d "CosyVoice2-0.5B" ] || [ ! -f "CosyVoice2-0.5B/flow.pt" ]; then
         log_info "Downloading from ModelScope: ${MODELSCOPE_MODEL}"
-        # Try modelscope CLI or manual download
+
+        mkdir -p CosyVoice2-0.5B
+
+        # Method 1: modelscope CLI
         if command -v modelscope &> /dev/null; then
             modelscope download --model "${MODELSCOPE_MODEL}" --local_dir ./CosyVoice2-0.5B
-        else
-            log_warn "modelscope CLI not found. Install with: pip install modelscope"
-            log_info "Manual download: https://modelscope.cn/models/${MODELSCOPE_MODEL}"
+        # Method 2: git clone from ModelScope
+        elif command -v git &> /dev/null; then
+            log_info "Using git clone from ModelScope..."
+            git lfs install 2>/dev/null || true
+            git clone --depth 1 "https://www.modelscope.cn/${MODELSCOPE_MODEL}.git" ./CosyVoice2-0.5B || {
+                log_warn "ModelScope git clone failed"
+            }
+        fi
+
+        # Method 3: Manual instructions
+        if [ ! -f "CosyVoice2-0.5B/flow.pt" ]; then
+            log_warn "Could not auto-download from ModelScope"
+            log_info ""
+            log_info "Please download manually:"
+            log_info "  1. Visit: https://modelscope.cn/models/${MODELSCOPE_MODEL}"
+            log_info "  2. Download and extract to: ${WORK_DIR}/CosyVoice2-0.5B/"
+            log_info ""
+            log_info "Or install modelscope CLI:"
+            log_info "  pip install modelscope"
+            log_info "  modelscope download --model ${MODELSCOPE_MODEL} --local_dir ./CosyVoice2-0.5B"
         fi
     else
         log_info "ModelScope model already downloaded"
     fi
 
     # Download speaker cache
-    if [ ! -f "CosyVoice2-0.5B/spk2info.pt" ]; then
+    if [ -d "CosyVoice2-0.5B" ] && [ ! -f "CosyVoice2-0.5B/spk2info.pt" ]; then
         log_info "Downloading speaker info cache..."
-        wget -q https://raw.githubusercontent.com/qi-hua/async_cosyvoice/main/CosyVoice2-0.5B/spk2info.pt \
-            -O ./CosyVoice2-0.5B/spk2info.pt || log_warn "Could not download spk2info.pt"
+        curl -L -o ./CosyVoice2-0.5B/spk2info.pt \
+            "https://raw.githubusercontent.com/qi-hua/async_cosyvoice/main/CosyVoice2-0.5B/spk2info.pt" \
+            2>/dev/null || log_warn "Could not download spk2info.pt"
     fi
 fi
 

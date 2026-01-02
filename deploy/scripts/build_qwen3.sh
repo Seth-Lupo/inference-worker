@@ -60,19 +60,72 @@ fi
 download_model() {
     log_info "Downloading Qwen3-8B from HuggingFace..."
 
-    if [ ! -d "${WORK_DIR}/Qwen3-8B" ]; then
-        if [ -n "$HF_TOKEN" ]; then
-            huggingface-cli download ${MODEL_NAME} \
-                --local-dir "${WORK_DIR}/Qwen3-8B" \
-                --token "$HF_TOKEN"
-        else
-            huggingface-cli download ${MODEL_NAME} \
-                --local-dir "${WORK_DIR}/Qwen3-8B"
-        fi
-        log_info "Model downloaded to ${WORK_DIR}/Qwen3-8B"
-    else
+    if [ -d "${WORK_DIR}/Qwen3-8B" ] && [ -f "${WORK_DIR}/Qwen3-8B/config.json" ]; then
         log_info "Model already exists at ${WORK_DIR}/Qwen3-8B"
+        return 0
     fi
+
+    mkdir -p "${WORK_DIR}/Qwen3-8B"
+
+    # Method 1: git clone with LFS (most reliable)
+    if command -v git &> /dev/null; then
+        log_info "Using git clone (requires git-lfs)..."
+
+        # Install git-lfs if needed
+        if ! command -v git-lfs &> /dev/null; then
+            log_warn "git-lfs not found, installing..."
+            sudo yum install -y git-lfs 2>/dev/null || sudo apt-get install -y git-lfs 2>/dev/null || {
+                log_warn "Could not install git-lfs automatically"
+            }
+        fi
+
+        git lfs install 2>/dev/null || true
+
+        # Clone with authentication if token provided
+        if [ -n "$HF_TOKEN" ]; then
+            GIT_URL="https://USER:${HF_TOKEN}@huggingface.co/${MODEL_NAME}"
+        else
+            GIT_URL="https://huggingface.co/${MODEL_NAME}"
+        fi
+
+        git clone --depth 1 "$GIT_URL" "${WORK_DIR}/Qwen3-8B" && {
+            log_info "Model downloaded via git clone"
+            return 0
+        }
+    fi
+
+    # Method 2: huggingface-cli if available
+    if command -v huggingface-cli &> /dev/null; then
+        log_info "Using huggingface-cli..."
+        if [ -n "$HF_TOKEN" ]; then
+            huggingface-cli download ${MODEL_NAME} --local-dir "${WORK_DIR}/Qwen3-8B" --token "$HF_TOKEN"
+        else
+            huggingface-cli download ${MODEL_NAME} --local-dir "${WORK_DIR}/Qwen3-8B"
+        fi
+        return 0
+    fi
+
+    # Method 3: Direct wget for essential files (minimal, may not have all weights)
+    log_warn "Neither git-lfs nor huggingface-cli available"
+    log_info "Attempting direct download of essential files..."
+
+    BASE_URL="https://huggingface.co/${MODEL_NAME}/resolve/main"
+
+    # Download config files
+    for file in config.json tokenizer.json tokenizer_config.json generation_config.json; do
+        curl -L -o "${WORK_DIR}/Qwen3-8B/${file}" "${BASE_URL}/${file}" 2>/dev/null || true
+    done
+
+    log_error "Could not download model weights without git-lfs or huggingface-cli"
+    log_info ""
+    log_info "Please install git-lfs:"
+    log_info "  sudo yum install git-lfs  # Amazon Linux"
+    log_info "  sudo apt install git-lfs  # Ubuntu"
+    log_info ""
+    log_info "Or install huggingface-cli:"
+    log_info "  pip install huggingface_hub"
+    log_info ""
+    return 1
 }
 
 # =============================================================================

@@ -103,7 +103,7 @@ fi
 
 # Test Docker GPU access
 log_info "Testing Docker GPU access..."
-docker run --rm --gpus all nvidia/cuda:12.0-base-ubuntu22.04 nvidia-smi > /dev/null 2>&1 && \
+docker run --rm --gpus all nvidia/cuda:13.0-base-ubuntu22.04 nvidia-smi > /dev/null 2>&1 && \
     log_info "Docker can access GPU" || \
     log_error "Docker cannot access GPU"
 
