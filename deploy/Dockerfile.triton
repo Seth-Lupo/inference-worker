@@ -21,12 +21,13 @@ RUN pip install --no-cache-dir \
         openai-whisper \
         wget
 
-# Install CosyVoice and Matcha-TTS from source
+# Install CosyVoice and Matcha-TTS from source (not pip packages, just add to PYTHONPATH)
 RUN git clone --recursive https://github.com/FunAudioLLM/CosyVoice.git /opt/CosyVoice && \
     cd /opt/CosyVoice && \
-    pip install --no-cache-dir -e . && \
-    cd third_party/Matcha-TTS && \
-    pip install --no-cache-dir -e .
+    pip install --no-cache-dir -r requirements.txt || true
+
+# Add CosyVoice and Matcha-TTS to Python path
+ENV PYTHONPATH="/opt/CosyVoice:/opt/CosyVoice/third_party/Matcha-TTS:${PYTHONPATH}"
 
 # Triton 25.12-trtllm-python-py3 includes:
 # - TensorRT-LLM 1.0.0+ (Qwen3 TensorRT engine support)
