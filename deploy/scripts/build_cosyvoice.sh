@@ -264,13 +264,43 @@ if [[ $START_STAGE -le -1 ]] && [[ $STOP_STAGE -ge -1 ]]; then
 fi
 
 # =============================================================================
+# Validate downloaded files are real (not LFS pointers)
+# =============================================================================
+check_file_real() {
+    local file="$1"
+    local min_size="${2:-1000000}"  # Default 1MB
+
+    if [ ! -f "$file" ]; then
+        return 1
+    fi
+
+    local size=$(stat -c%s "$file" 2>/dev/null || stat -f%z "$file" 2>/dev/null || echo "0")
+    if [ "$size" -gt "$min_size" ]; then
+        return 0  # Real file
+    fi
+    return 1  # LFS pointer or too small
+}
+
+check_cosyvoice_llm_complete() {
+    local dir="$1"
+    # Check for model.safetensors > 1MB (LFS pointers are ~130 bytes)
+    check_file_real "$dir/model.safetensors" 1000000
+}
+
+check_cosyvoice_modelscope_complete() {
+    local dir="$1"
+    # Check for flow.pt > 1MB
+    check_file_real "$dir/flow.pt" 1000000
+}
+
+# =============================================================================
 # Stage 0: Download Models
 # =============================================================================
 if [[ $START_STAGE -le 0 ]] && [[ $STOP_STAGE -ge 0 ]]; then
     log_info "Stage 0: Downloading CosyVoice2-0.5B models..."
 
     # Download LLM checkpoint from HuggingFace
-    if [ ! -d "cosyvoice2_llm" ] || [ ! -f "cosyvoice2_llm/config.json" ]; then
+    if [ ! -d "cosyvoice2_llm" ] || ! check_cosyvoice_llm_complete "cosyvoice2_llm"; then
         log_info "Downloading LLM from HuggingFace: ${HF_MODEL}"
 
         mkdir -p cosyvoice2_llm
@@ -286,10 +316,16 @@ if [[ $START_STAGE -le 0 ]] && [[ $STOP_STAGE -ge 0 ]]; then
             fi
 
             git clone --depth 1 "$GIT_URL" ./cosyvoice2_llm && log_info "LLM downloaded via git"
+
+            # Validate real files were downloaded (not LFS pointers)
+            if ! check_cosyvoice_llm_complete "cosyvoice2_llm"; then
+                log_warn "Git clone got LFS pointers, trying git lfs pull..."
+                cd cosyvoice2_llm && git lfs pull && cd ..
+            fi
         fi
 
         # Method 2: huggingface-cli fallback
-        if [ ! -f "cosyvoice2_llm/config.json" ] && command -v huggingface-cli &> /dev/null; then
+        if ! check_cosyvoice_llm_complete "cosyvoice2_llm" && command -v huggingface-cli &> /dev/null; then
             log_info "Trying huggingface-cli..."
             if [ -n "$HF_TOKEN" ]; then
                 huggingface-cli download --local-dir ./cosyvoice2_llm "${HF_MODEL}" --token "$HF_TOKEN"
@@ -298,9 +334,10 @@ if [[ $START_STAGE -le 0 ]] && [[ $STOP_STAGE -ge 0 ]]; then
             fi
         fi
 
-        if [ ! -f "cosyvoice2_llm/config.json" ]; then
-            log_error "Could not download LLM. Please install git-lfs:"
+        if ! check_cosyvoice_llm_complete "cosyvoice2_llm"; then
+            log_error "Could not download LLM with real weights. Please install git-lfs:"
             log_info "  sudo yum install git-lfs && git lfs install"
+            log_info "Then run: cd cosyvoice2_llm && git lfs pull"
             exit 1
         fi
     else
@@ -308,7 +345,7 @@ if [[ $START_STAGE -le 0 ]] && [[ $STOP_STAGE -ge 0 ]]; then
     fi
 
     # Download full model from ModelScope
-    if [ ! -d "CosyVoice2-0.5B" ] || [ ! -f "CosyVoice2-0.5B/flow.pt" ]; then
+    if [ ! -d "CosyVoice2-0.5B" ] || ! check_cosyvoice_modelscope_complete "CosyVoice2-0.5B"; then
         log_info "Downloading from ModelScope: ${MODELSCOPE_MODEL}"
 
         mkdir -p CosyVoice2-0.5B
@@ -325,9 +362,9 @@ if [[ $START_STAGE -le 0 ]] && [[ $STOP_STAGE -ge 0 ]]; then
             }
         fi
 
-        # Method 3: Manual instructions
-        if [ ! -f "CosyVoice2-0.5B/flow.pt" ]; then
-            log_warn "Could not auto-download from ModelScope"
+        # Validate real files were downloaded
+        if ! check_cosyvoice_modelscope_complete "CosyVoice2-0.5B"; then
+            log_warn "Could not auto-download from ModelScope or got LFS pointers"
             log_info ""
             log_info "Please download manually:"
             log_info "  1. Visit: https://modelscope.cn/models/${MODELSCOPE_MODEL}"

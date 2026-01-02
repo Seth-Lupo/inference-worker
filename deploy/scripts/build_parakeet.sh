@@ -174,6 +174,13 @@ download_from_sherpa() {
     if [ -n "$EXTRACTED_DIR" ]; then
         cp "${EXTRACTED_DIR}"/*.onnx "${PARAKEET_DIR}/1/" 2>/dev/null || true
         cp "${EXTRACTED_DIR}"/*.txt "${PARAKEET_DIR}/1/" 2>/dev/null || true
+
+        # Rename INT8 files to standard names (sherpa-onnx uses .int8.onnx suffix)
+        cd "${PARAKEET_DIR}/1/"
+        for f in *.int8.onnx; do
+            [ -f "$f" ] && mv "$f" "${f%.int8.onnx}.onnx"
+        done
+        cd "${WORK_DIR}"
     fi
 
     return 0
