@@ -2,9 +2,15 @@
 Triton Inference Server client with async gRPC streaming support.
 
 Provides connection management and inference methods for decoupled models.
+
+Features:
+- Async gRPC connection management
+- Streaming inference for decoupled models (like CosyVoice2)
+- Cancel event support for barge-in
 """
 import asyncio
 import logging
+import time
 from dataclasses import dataclass
 from typing import AsyncIterator, Optional, Dict, List
 import numpy as np
@@ -140,6 +146,10 @@ class TritonClient:
         if not self._connected:
             await self.connect()
 
+        logger.info(f"Triton: Starting stream inference for model={model_name}")
+        logger.debug(f"Triton: Inputs={list(inputs.keys())}, outputs={output_names}")
+        stream_start = time.perf_counter()
+
         triton_inputs = self._build_inputs(inputs)
         triton_outputs = [grpcclient.InferRequestedOutput(n) for n in output_names]
 
@@ -147,37 +157,47 @@ class TritonClient:
         response_queue: asyncio.Queue = asyncio.Queue()
         stream_complete = asyncio.Event()
         error_holder = [None]
+        response_count = [0]
 
         async def response_callback(result, error):
             """Callback for streaming responses."""
             if error:
+                logger.error(f"Triton: Stream callback error: {error}")
                 error_holder[0] = error
                 stream_complete.set()
             elif result is None:
+                logger.debug(f"Triton: Stream complete signal received")
                 stream_complete.set()
             else:
+                response_count[0] += 1
+                logger.debug(f"Triton: Received response #{response_count[0]}")
                 await response_queue.put(result)
 
         # Start streaming context
+        logger.debug(f"Triton: Starting stream context...")
         await self._client.start_stream(callback=response_callback)
 
         try:
             # Send request
+            logger.debug(f"Triton: Sending async_stream_infer request...")
             await self._client.async_stream_infer(
                 model_name=model_name,
                 inputs=triton_inputs,
                 outputs=triton_outputs,
             )
+            logger.debug(f"Triton: Request sent, waiting for responses...")
 
             # Yield results as they arrive
+            result_count = 0
             while True:
                 # Check for cancellation
                 if cancel_event and cancel_event.is_set():
-                    logger.debug("Stream cancelled by caller")
+                    logger.info(f"Triton: Stream cancelled by caller after {result_count} results")
                     break
 
                 # Check if stream is done
                 if stream_complete.is_set() and response_queue.empty():
+                    logger.debug(f"Triton: Stream complete, no more results")
                     break
 
                 # Get next result with timeout
@@ -195,19 +215,26 @@ class TritonClient:
                 outputs = {}
                 for name in output_names:
                     try:
-                        outputs[name] = result.as_numpy(name)
-                    except Exception:
-                        pass
+                        arr = result.as_numpy(name)
+                        outputs[name] = arr
+                        logger.debug(f"Triton: Output '{name}' shape={arr.shape}, dtype={arr.dtype}")
+                    except Exception as e:
+                        logger.debug(f"Triton: Failed to get output '{name}': {e}")
 
                 if outputs:
+                    result_count += 1
                     yield InferenceResult(outputs=outputs, model_name=model_name)
 
             # Check for errors
             if error_holder[0]:
                 raise RuntimeError(f"Stream error: {error_holder[0]}")
 
+            elapsed = (time.perf_counter() - stream_start) * 1000
+            logger.info(f"Triton: Stream complete - {result_count} results in {elapsed:.0f}ms")
+
         finally:
             await self._client.stop_stream()
+            logger.debug(f"Triton: Stream stopped")
 
     async def __aenter__(self):
         await self.connect()

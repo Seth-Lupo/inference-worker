@@ -2,6 +2,13 @@
 CosyVoice 2 TTS via Triton Inference Server.
 
 Streaming text-to-speech with interrupt support for barge-in.
+
+Model inputs:
+- target_text: Text to synthesize (required)
+- stream: Enable streaming output (default: True)
+
+Model outputs:
+- waveform: Float32 audio samples at 22050Hz
 """
 import asyncio
 import logging
@@ -26,8 +33,9 @@ class AudioChunk:
 class TTSConfig:
     """CosyVoice TTS configuration."""
     model_name: str = "cosyvoice2"
-    sample_rate: int = 22050      # Native CosyVoice rate
-    output_rate: int = 16000      # Output rate (resampled)
+    sample_rate: int = 22050      # Native CosyVoice output rate
+    output_rate: int = 16000      # Target output rate (resampled)
+    streaming: bool = True        # Use streaming inference
 
 
 class CosyVoiceTTS:
@@ -85,19 +93,23 @@ class CosyVoiceTTS:
             AudioChunk with PCM16 audio data
         """
         if not text.strip():
+            logger.warning("CosyVoice: Empty text, skipping")
             return
 
         start = time.perf_counter()
         self._cancel_event.clear()
         self._is_speaking = True
 
-        logger.debug(f"TTS: '{text[:50]}...' ({len(text)} chars)")
+        logger.info(f"CosyVoice: Synthesizing '{text[:60]}{'...' if len(text) > 60 else ''}' ({len(text)} chars)")
 
         try:
-            # Build input
+            # Build inputs for CosyVoice2 BLS model
             inputs = {
                 "target_text": np.array([[text]], dtype=object),
+                "stream": np.array([[self._config.streaming]], dtype=bool),
             }
+
+            logger.debug(f"CosyVoice: Inputs - target_text shape={inputs['target_text'].shape}, stream={self._config.streaming}")
 
             # Stream inference
             first_chunk = True
@@ -112,25 +124,31 @@ class CosyVoiceTTS:
             ):
                 # Check interrupt
                 if self._cancel_event.is_set():
-                    logger.debug("TTS cancelled mid-stream")
+                    logger.info("CosyVoice: Cancelled mid-stream")
                     break
 
                 # Extract waveform
                 waveform = result.outputs.get("waveform")
-                if waveform is None or len(waveform.flatten()) == 0:
+                if waveform is None:
+                    logger.debug(f"CosyVoice: No waveform in result, outputs={list(result.outputs.keys())}")
                     continue
 
                 waveform = waveform.flatten().astype(np.float32)
+                if len(waveform) == 0:
+                    logger.debug("CosyVoice: Empty waveform chunk")
+                    continue
 
-                # Log first chunk latency
+                # Log first chunk latency (TTFB)
                 if first_chunk:
                     ttfb = (time.perf_counter() - start) * 1000
-                    logger.info(f"TTS first chunk: {ttfb:.0f}ms")
+                    logger.info(f"CosyVoice: TTFB={ttfb:.0f}ms, chunk_samples={len(waveform)}")
                     first_chunk = False
 
-                # Resample if needed
+                # Resample 22050Hz -> 16000Hz
                 if self._resample_ratio != 1.0:
+                    original_len = len(waveform)
                     waveform = self._resample(waveform)
+                    logger.debug(f"CosyVoice: Resampled {original_len} -> {len(waveform)} samples")
 
                 # Convert to PCM16
                 audio = self._to_pcm16(waveform)
@@ -138,23 +156,24 @@ class CosyVoiceTTS:
                 total_samples += len(waveform)
                 chunk_count += 1
 
+                logger.debug(f"CosyVoice: Chunk {chunk_count}: {len(audio)} bytes ({len(waveform)} samples)")
                 yield AudioChunk(data=audio, is_final=False)
 
-            # Final chunk (if not interrupted)
+            # Final chunk marker (if not interrupted)
             if not self._cancel_event.is_set():
                 yield AudioChunk(data=b"", is_final=True)
 
                 # Stats
                 elapsed = (time.perf_counter() - start) * 1000
-                duration = total_samples / self._config.output_rate * 1000
-                rtf = elapsed / duration if duration > 0 else 0
+                duration_ms = total_samples / self._config.output_rate * 1000 if total_samples > 0 else 0
+                rtf = elapsed / duration_ms if duration_ms > 0 else 0
                 logger.info(
-                    f"TTS done: {chunk_count} chunks, "
-                    f"{duration:.0f}ms audio in {elapsed:.0f}ms (RTF={rtf:.2f})"
+                    f"CosyVoice: Complete - {chunk_count} chunks, "
+                    f"{total_samples} samples ({duration_ms:.0f}ms audio) in {elapsed:.0f}ms (RTF={rtf:.2f})"
                 )
 
         except Exception as e:
-            logger.error(f"TTS error: {e}")
+            logger.error(f"CosyVoice: Synthesis error: {e}", exc_info=True)
             raise
         finally:
             self._is_speaking = False

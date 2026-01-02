@@ -6,10 +6,17 @@ Usage:
     python run.py                    # Run on port 80 (requires sudo on Linux/Mac)
     python run.py --port 8080        # Run on port 8080
     python run.py --host 127.0.0.1   # Bind to localhost only
+
+Environment variables:
+    TTS_BACKEND     - "mock" or "cosyvoice" (default: cosyvoice)
+    TRITON_URL      - Triton gRPC URL (default: localhost:8001)
+    TTS_MODEL       - TTS model name (default: cosyvoice2)
+    LOG_LEVEL       - DEBUG, INFO, WARNING, ERROR (default: INFO)
 """
 import argparse
 import asyncio
 import logging
+import os
 import sys
 
 # Add src to path
@@ -18,11 +25,11 @@ sys.path.insert(0, ".")
 from src.server import run_server
 
 
-def setup_logging(debug: bool = False) -> None:
+def setup_logging(level: str = "INFO") -> None:
     """Configure logging."""
-    level = logging.DEBUG if debug else logging.INFO
+    log_level = getattr(logging, level.upper(), logging.INFO)
     logging.basicConfig(
-        level=level,
+        level=log_level,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S"
     )
@@ -34,27 +41,29 @@ def main():
     parser.add_argument("--port", type=int, default=80, help="Port to listen on")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
 
-    # TTS backend configuration
+    # TTS config from env vars with CLI override
     parser.add_argument(
         "--tts-backend",
         choices=["mock", "cosyvoice"],
-        default="mock",
-        help="TTS backend to use (default: mock)"
+        default=os.environ.get("TTS_BACKEND", "cosyvoice"),
+        help="TTS backend (env: TTS_BACKEND, default: cosyvoice)"
     )
     parser.add_argument(
         "--triton-url",
-        default="localhost:8001",
-        help="Triton Inference Server gRPC URL (default: localhost:8001)"
+        default=os.environ.get("TRITON_URL", "localhost:8001"),
+        help="Triton gRPC URL (env: TRITON_URL, default: localhost:8001)"
     )
     parser.add_argument(
         "--tts-model",
-        default="cosyvoice2",
-        help="TTS model name on Triton (default: cosyvoice2)"
+        default=os.environ.get("TTS_MODEL", "cosyvoice2"),
+        help="TTS model name (env: TTS_MODEL, default: cosyvoice2)"
     )
 
     args = parser.parse_args()
 
-    setup_logging(args.debug)
+    # Log level from env or --debug flag
+    log_level = "DEBUG" if args.debug else os.environ.get("LOG_LEVEL", "INFO")
+    setup_logging(log_level)
 
     tts_info = f"TTS: {args.tts_backend}"
     if args.tts_backend == "cosyvoice":

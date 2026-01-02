@@ -98,6 +98,8 @@ services:
     environment:
       - TRITON_URL=triton:8001
       - TRITON_HTTP_URL=http://triton:8000
+      - TTS_BACKEND=cosyvoice
+      - TTS_MODEL=cosyvoice2
       - LOG_LEVEL=INFO
       - PYTHONUNBUFFERED=1
 
