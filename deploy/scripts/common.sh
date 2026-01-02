@@ -16,10 +16,10 @@ readonly YELLOW='\033[1;33m'
 readonly BLUE='\033[0;34m'
 readonly NC='\033[0m'
 
-log_info()  { echo -e "${GREEN}[INFO]${NC} $*"; }
-log_warn()  { echo -e "${YELLOW}[WARN]${NC} $*"; }
+log_info()  { echo -e "${GREEN}[INFO]${NC} $*" >&2; }
+log_warn()  { echo -e "${YELLOW}[WARN]${NC} $*" >&2; }
 log_error() { echo -e "${RED}[ERROR]${NC} $*" >&2; }
-log_step()  { echo -e "${BLUE}[STEP]${NC} $*"; }
+log_step()  { echo -e "${BLUE}[STEP]${NC} $*" >&2; }
 
 # =============================================================================
 # Path Resolution
