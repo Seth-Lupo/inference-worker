@@ -23,10 +23,10 @@ log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
 # Container configuration
-# IMPORTANT: Use same TRT-LLM version as Triton serving container!
-# Triton 24.12 has TRT-LLM 0.16.0, so use matching DEV container for building
-# (tritonserver container is serving-only, no build tools)
-TRTLLM_IMAGE="nvcr.io/nvidia/tensorrt-llm/release:0.16.0"
+# IMPORTANT: Use Triton container for building to guarantee version match!
+# Triton 24.12-trtllm-python-py3 has TRT-LLM 0.16.0 built-in
+# This ensures the engine is compatible with the serving container
+TRTLLM_IMAGE="nvcr.io/nvidia/tritonserver:24.12-trtllm-python-py3"
 TRTLLM_CONTAINER_NAME="trtllm-builder-qwen3"
 
 # Load environment
@@ -297,15 +297,18 @@ build_engine() {
             CHECKPOINT_DIR=/workspace/build/checkpoint_${QUANTIZATION}
             ENGINE_DIR=/workspace/build/engine_${QUANTIZATION}
 
-            echo '=== Step 1: Quantizing model ==='
+            echo '=== TensorRT-LLM Version Check ==='
+            python3 -c 'import tensorrt_llm; print(f\"TRT-LLM version: {tensorrt_llm.__version__}\")'
 
-            # The TensorRT-LLM container has quantize.py in examples/quantization
-            cd /app/tensorrt_llm/examples/quantization
+            echo '=== Step 1: Converting/Quantizing model ==='
+
+            # Use TRT-LLM's convert_checkpoint command (available in 0.16.0)
+            # For Qwen models, we use the qwen conversion path
 
             if [ '${QUANTIZATION}' == 'none' ]; then
                 # No quantization - just convert checkpoint
                 echo 'Converting without quantization (FP16)...'
-                python3 quantize.py \
+                python3 -m tensorrt_llm.commands.convert_checkpoint \
                     --model_dir \$MODEL_DIR \
                     --output_dir \$CHECKPOINT_DIR \
                     --dtype float16
@@ -313,29 +316,32 @@ build_engine() {
             elif [ '${QUANTIZATION}' == 'fp8' ]; then
                 # FP8 quantization (best for Hopper/Ada GPUs)
                 echo 'Quantizing to FP8...'
-                python3 quantize.py \
+                python3 -m tensorrt_llm.commands.convert_checkpoint \
                     --model_dir \$MODEL_DIR \
-                    --qformat fp8 \
-                    --kv_cache_dtype fp8 \
-                    --output_dir \$CHECKPOINT_DIR
+                    --output_dir \$CHECKPOINT_DIR \
+                    --dtype float16 \
+                    --use_fp8
 
             elif [ '${QUANTIZATION}' == 'int8_sq' ]; then
                 # INT8 SmoothQuant (good balance, works on older GPUs)
                 echo 'Quantizing with INT8 SmoothQuant...'
-                python3 quantize.py \
+                python3 -m tensorrt_llm.commands.convert_checkpoint \
                     --model_dir \$MODEL_DIR \
-                    --qformat int8_sq \
-                    --kv_cache_dtype int8 \
-                    --output_dir \$CHECKPOINT_DIR
+                    --output_dir \$CHECKPOINT_DIR \
+                    --dtype float16 \
+                    --smoothquant 0.5 \
+                    --int8_kv_cache
 
             elif [ '${QUANTIZATION}' == 'int4_awq' ]; then
                 # INT4 AWQ (smallest, good for memory-constrained)
+                # AWQ requires pre-quantized weights or calibration
                 echo 'Quantizing with INT4 AWQ...'
-                python3 quantize.py \
+                python3 -m tensorrt_llm.commands.convert_checkpoint \
                     --model_dir \$MODEL_DIR \
-                    --qformat int4_awq \
-                    --awq_block_size 128 \
-                    --output_dir \$CHECKPOINT_DIR
+                    --output_dir \$CHECKPOINT_DIR \
+                    --dtype float16 \
+                    --use_weight_only \
+                    --weight_only_precision int4_awq
 
             else
                 echo 'Unknown quantization: ${QUANTIZATION}'

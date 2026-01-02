@@ -105,10 +105,10 @@ log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
 # Container configuration
-# IMPORTANT: Use same TRT-LLM version as Triton serving container!
-# Triton 24.12 has TRT-LLM 0.16.0, so use matching DEV container for building
-# (tritonserver container is serving-only, no build tools)
-TRTLLM_IMAGE="nvcr.io/nvidia/tensorrt-llm/release:0.16.0"
+# IMPORTANT: Use Triton container for building to guarantee version match!
+# Triton 24.12-trtllm-python-py3 has TRT-LLM 0.16.0 built-in
+# This ensures the engine is compatible with the serving container
+TRTLLM_IMAGE="nvcr.io/nvidia/tritonserver:24.12-trtllm-python-py3"
 TRTLLM_CONTAINER_NAME="trtllm-builder-cosyvoice"
 
 # Load environment
@@ -377,6 +377,9 @@ if [[ $START_STAGE -le 1 ]] && [[ $STOP_STAGE -ge 1 ]]; then
         "${TRTLLM_IMAGE}" \
         bash -c "
             set -e
+
+            echo '=== TensorRT-LLM Version Check ==='
+            python3 -c 'import tensorrt_llm; print(f\"TRT-LLM version: {tensorrt_llm.__version__}\")'
 
             # Convert checkpoint to TensorRT weights using CosyVoice's script
             echo 'Converting checkpoint to TensorRT weights...'
