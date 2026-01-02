@@ -30,7 +30,7 @@ source "${SCRIPT_DIR}/common.sh"
 # =============================================================================
 # Configuration
 # =============================================================================
-COSYVOICE_REPO="${COSYVOICE_REPO:-https://github.com/FunAudioLLM/CosyVoice.git}"
+COSYVOICE_REPO="${COSYVOICE_REPO:-https://github.com/Seth-Lupo/CosyVoice.git}"
 HF_MODEL="${HF_MODEL:-yuekai/cosyvoice2_llm}"
 MODELSCOPE_MODEL="${MODELSCOPE_MODEL:-iic/CosyVoice2-0.5B}"
 
