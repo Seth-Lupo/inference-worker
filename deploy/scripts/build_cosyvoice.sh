@@ -139,7 +139,7 @@ cd "${WORK_DIR}"
 # =============================================================================
 # Stage -1: Clone CosyVoice Repository
 # =============================================================================
-if [ $START_STAGE -le -1 ] && [ $STOP_STAGE -ge -1 ]; then
+if [[ $START_STAGE -le -1 ]] && [[ $STOP_STAGE -ge -1 ]]; then
     log_info "Stage -1: Cloning CosyVoice repository..."
 
     if [ ! -d "CosyVoice" ]; then
@@ -155,7 +155,7 @@ fi
 # =============================================================================
 # Stage 0: Download Models
 # =============================================================================
-if [ $START_STAGE -le 0 ] && [ $STOP_STAGE -ge 0 ]; then
+if [[ $START_STAGE -le 0 ]] && [[ $STOP_STAGE -ge 0 ]]; then
     log_info "Stage 0: Downloading CosyVoice2-0.5B models..."
 
     # Download LLM checkpoint from HuggingFace
@@ -256,7 +256,7 @@ pull_container() {
 # =============================================================================
 # Stage 1: Convert to TensorRT-LLM and Build Engines
 # =============================================================================
-if [ $START_STAGE -le 1 ] && [ $STOP_STAGE -ge 1 ]; then
+if [[ $START_STAGE -le 1 ]] && [[ $STOP_STAGE -ge 1 ]]; then
     log_info "Stage 1: Converting checkpoint and building TensorRT engines..."
 
     TRT_WEIGHTS_DIR="./trt_weights_${TRT_DTYPE}"
@@ -307,7 +307,7 @@ fi
 # =============================================================================
 # Stage 2: Create Model Repository
 # =============================================================================
-if [ $START_STAGE -le 2 ] && [ $STOP_STAGE -ge 2 ]; then
+if [[ $START_STAGE -le 2 ]] && [[ $STOP_STAGE -ge 2 ]]; then
     log_info "Stage 2: Creating Triton model repository..."
 
     MODEL_REPO="${DEPLOY_DIR}/model_repository/cosyvoice2_full"
@@ -363,7 +363,7 @@ fi
 # =============================================================================
 # Stage 3: Test the Setup
 # =============================================================================
-if [ $START_STAGE -le 3 ] && [ $STOP_STAGE -ge 3 ]; then
+if [[ $START_STAGE -le 3 ]] && [[ $STOP_STAGE -ge 3 ]]; then
     log_info "Stage 3: Model repository ready for Triton"
     log_info ""
     log_info "To start Triton with CosyVoice2:"
