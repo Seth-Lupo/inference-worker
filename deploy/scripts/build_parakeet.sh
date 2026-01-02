@@ -192,8 +192,8 @@ download_from_sherpa() {
     cd "${WORK_DIR}"
     tar -xjf "${ARCHIVE}"
 
-    # Find and copy model files
-    EXTRACTED_DIR=$(find . -maxdepth 1 -type d -name "*parakeet*" | head -1)
+    # Find and copy model files (look for sherpa-onnx specific directory)
+    EXTRACTED_DIR=$(find . -maxdepth 1 -type d -name "sherpa-onnx-*parakeet*" | head -1)
     if [ -z "$EXTRACTED_DIR" ]; then
         log_error "Could not find extracted parakeet directory"
         return 1
