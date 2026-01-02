@@ -2,16 +2,19 @@
 # Using Triton 25.12 with TRT-LLM 1.0.0+ (Qwen3 TensorRT engine support)
 FROM nvcr.io/nvidia/tritonserver:25.12-trtllm-python-py3
 
-# Install Python packages for Parakeet ASR and CosyVoice TTS
+# Install PyTorch with CUDA 13.0 support + torchaudio
 RUN pip install --no-cache-dir \
-    sherpa-onnx \
-    onnxruntime-gpu \
-    numpy \
-    transformers \
-    sentencepiece \
-    torchaudio \
-    hyperpyyaml \
-    s3tokenizer
+        torch torchaudio --index-url https://download.pytorch.org/whl/cu130
+
+# Install other Python packages for Parakeet ASR and CosyVoice TTS
+RUN pip install --no-cache-dir \
+        sherpa-onnx \
+        onnxruntime-gpu \
+        numpy \
+        transformers \
+        sentencepiece \
+        hyperpyyaml \
+        s3tokenizer
 
 # Triton 25.12-trtllm-python-py3 includes:
 # - TensorRT-LLM 1.0.0+ (Qwen3 TensorRT engine support)
