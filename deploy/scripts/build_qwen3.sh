@@ -37,7 +37,7 @@ fi
 # Qwen3-8B-Base is the pretrained-only version
 MODEL_NAME="Qwen/Qwen3-8B"
 MODEL_DIR_NAME="Qwen3-8B"
-QUANTIZATION="${2:-int8_sq}"  # Options: fp8, int8_sq, int4_awq, none
+QUANTIZATION="${1:-int8_sq}"  # Options: fp8, int8_sq, int4_awq, none
 
 # =============================================================================
 # Handle cleanup command
