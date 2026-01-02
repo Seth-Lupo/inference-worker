@@ -5,8 +5,11 @@ services:
   # Triton Inference Server with TensorRT-LLM Backend
   # =============================================================================
   triton:
-    # Full Triton image with ONNX Runtime + TensorRT-LLM + Python backends
-    image: nvcr.io/nvidia/tritonserver:24.12-py3
+    # Custom Triton image with TensorRT-LLM + Python backends + sherpa-onnx
+    build:
+      context: .
+      dockerfile: Dockerfile.triton
+    image: voice-agent-triton:latest
     container_name: voice-agent-triton
     restart: unless-stopped
 
@@ -31,7 +34,8 @@ services:
       - "8002:8002"   # Metrics
 
     volumes:
-      # Model repository (base models: silero_vad, parakeet_tdt, qwen3_8b)
+      # Model repository (parakeet_tdt, qwen3_8b)
+      # Note: silero_vad runs locally in worker, not in Triton
       - ./model_repository:/models:ro
       # Mount built Qwen3 TensorRT-LLM engine
       - ./qwen3_build/engine_int4_awq:/models/qwen3_8b/1/engine:ro

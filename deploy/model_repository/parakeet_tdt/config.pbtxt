@@ -1,36 +1,26 @@
 # Parakeet TDT 0.6B V2 - Automatic Speech Recognition
-# ONNX/TensorRT model for speech-to-text transcription
+# Python backend wrapping sherpa-onnx for transducer ASR
 #
-# Input: 16kHz mono audio (variable length)
-# Output: Token IDs for decoding
+# Input: 16kHz mono audio (float32, normalized to [-1, 1])
+# Output: Transcription text
 
 name: "parakeet_tdt"
-backend: "onnxruntime"
+backend: "python"
 max_batch_size: 8
 
 input [
   {
-    name: "audio_signal"
+    name: "audio"
     data_type: TYPE_FP32
-    dims: [ -1 ]  # Variable length audio
-  },
-  {
-    name: "length"
-    data_type: TYPE_INT64
-    dims: [ 1 ]  # Audio length in samples
+    dims: [ -1 ]  # Variable length audio samples
   }
 ]
 
 output [
   {
-    name: "tokens"
-    data_type: TYPE_INT64
-    dims: [ -1 ]  # Variable length token sequence
-  },
-  {
-    name: "token_timestamps"
-    data_type: TYPE_FP32
-    dims: [ -1 ]  # Timestamps for each token
+    name: "transcription"
+    data_type: TYPE_STRING
+    dims: [ 1 ]
   }
 ]
 
@@ -43,32 +33,8 @@ instance_group [
 ]
 
 dynamic_batching {
-  preferred_batch_size: [ 1, 2, 4, 8 ]
+  preferred_batch_size: [ 1, 2, 4 ]
   max_queue_delay_microseconds: 50000
 }
-
-# Model warmup to reduce first inference latency
-model_warmup [
-  {
-    name: "warmup_audio"
-    batch_size: 1
-    inputs {
-      key: "audio_signal"
-      value: {
-        data_type: TYPE_FP32
-        dims: [ 16000 ]  # 1 second of audio
-        zero_data: true
-      }
-    }
-    inputs {
-      key: "length"
-      value: {
-        data_type: TYPE_INT64
-        dims: [ 1 ]
-        zero_data: true
-      }
-    }
-  }
-]
 
 version_policy: { latest: { num_versions: 1 } }

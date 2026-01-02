@@ -3,6 +3,91 @@
 # Build CosyVoice 2 TensorRT-LLM Engines
 # Based on: https://github.com/FunAudioLLM/CosyVoice/blob/main/runtime/triton_trtllm/run.sh
 # =============================================================================
+#
+# USAGE:
+#   ./build_cosyvoice.sh [START_STAGE] [STOP_STAGE]
+#   ./build_cosyvoice.sh -1 2      # Run all stages
+#   ./build_cosyvoice.sh 1 1       # Only build TRT engines
+#   ./build_cosyvoice.sh cleanup   # Clean up build artifacts
+#
+# =============================================================================
+# STAGES EXPLAINED
+# =============================================================================
+#
+# Stage -1: CLONE COSYVOICE REPO
+#   - Clones https://github.com/FunAudioLLM/CosyVoice
+#   - Contains: conversion scripts, Triton model templates, Python backends
+#   - Output: cosyvoice_build/CosyVoice/
+#
+# Stage 0: DOWNLOAD MODELS
+#   - Downloads LLM checkpoint from HuggingFace (yuekai/cosyvoice2_llm)
+#     → This is the autoregressive text-to-token model
+#   - Downloads full model from ModelScope (iic/CosyVoice2-0.5B)
+#     → Contains: flow.pt (vocoder), speech tokenizer, speaker embeddings
+#   - Output: cosyvoice_build/cosyvoice2_llm/, cosyvoice_build/CosyVoice2-0.5B/
+#
+# Stage 1: BUILD TENSORRT-LLM ENGINES
+#   - Runs inside TensorRT-LLM dev container (~20GB image)
+#   - Step 1: convert_checkpoint.py converts HuggingFace LLM → TRT-LLM weights
+#   - Step 2: trtllm-build compiles weights → optimized TensorRT engine
+#   - Output: cosyvoice_build/trt_engines_bfloat16/rank0.engine
+#
+# Stage 2: CREATE TRITON MODEL REPOSITORY
+#   - Copies Triton model templates from CosyVoice repo
+#   - Fills in config.pbtxt with paths to engines and model files
+#   - Copies all assets into self-contained model_repository/cosyvoice2_full/
+#   - Output: model_repository/cosyvoice2_full/ with 5 models:
+#
+#     ┌─────────────────────────────────────────────────────────────────┐
+#     │                    COSYVOICE2 TRITON MODELS                     │
+#     ├─────────────────────────────────────────────────────────────────┤
+#     │  cosyvoice2/        BLS orchestrator (Python backend)           │
+#     │    └── Coordinates all models, handles streaming chunking       │
+#     │                                                                 │
+#     │  tensorrt_llm/      Text → Speech Tokens (TRT-LLM engine)       │
+#     │    └── Autoregressive LLM that generates semantic tokens        │
+#     │                                                                 │
+#     │  token2wav/         Speech Tokens → Audio (Python backend)      │
+#     │    └── Flow-matching vocoder, converts tokens to waveform       │
+#     │                                                                 │
+#     │  audio_tokenizer/   Reference Audio → Tokens (Python backend)   │
+#     │    └── For voice cloning: extracts tokens from reference audio  │
+#     │                                                                 │
+#     │  speaker_embedding/ Reference Audio → Embedding (Python backend)│
+#     │    └── For voice cloning: extracts speaker characteristics      │
+#     └─────────────────────────────────────────────────────────────────┘
+#
+# Stage 3: VERIFICATION (placeholder)
+#   - Prints instructions for starting Triton
+#
+# =============================================================================
+# INFERENCE FLOW (after build)
+# =============================================================================
+#
+#   Input Text
+#       │
+#       ▼
+#   ┌───────────────┐
+#   │  cosyvoice2   │  BLS orchestrator
+#   │   (Python)    │  - Tokenizes text
+#   └───────┬───────┘  - Manages streaming
+#           │
+#           ▼
+#   ┌───────────────┐
+#   │ tensorrt_llm  │  Autoregressive LLM
+#   │  (TRT-LLM)    │  - Generates speech tokens
+#   └───────┬───────┘  - Streaming: emits tokens incrementally
+#           │
+#           ▼
+#   ┌───────────────┐
+#   │   token2wav   │  Flow-matching vocoder
+#   │   (Python)    │  - Converts tokens to audio
+#   └───────┬───────┘  - Chunked output for streaming
+#           │
+#           ▼
+#     Audio Output
+#
+# =============================================================================
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
