@@ -49,55 +49,71 @@ if [ "$1" == "cleanup" ] || [ "$1" == "clean" ]; then
         docker rm -f "${TRTLLM_CONTAINER_NAME}" 2>/dev/null || true
     fi
 
-    # Parse cleanup options
-    REMOVE_BUILDS=false
-    REMOVE_IMAGE=false
+    # --keep-engine: Remove downloads/checkpoints but keep built engine (default)
+    if [ "$2" == "--keep-engine" ] || [ "$2" == "-k" ] || [ -z "$2" ]; then
+        log_info "Removing downloaded models and checkpoints (keeping engines)..."
 
-    for arg in "$@"; do
-        case $arg in
-            --builds|--all|-a)
-                REMOVE_BUILDS=true
-                ;;
-            --image|-i)
-                REMOVE_IMAGE=true
-                ;;
-            --everything)
-                REMOVE_BUILDS=true
-                REMOVE_IMAGE=true
-                ;;
-        esac
-    done
+        # Remove HuggingFace LLM download
+        if [ -d "${WORK_DIR}/cosyvoice2_llm" ]; then
+            log_info "  Removing cosyvoice2_llm/..."
+            rm -rf "${WORK_DIR}/cosyvoice2_llm"
+        fi
 
-    # Remove build artifacts (models, checkpoints, engines)
-    if [ "$REMOVE_BUILDS" = true ]; then
-        log_warn "Removing all build artifacts at ${WORK_DIR}..."
-        rm -rf "${WORK_DIR}"
-        log_info "Build directory removed (models, checkpoints, engines)"
+        # Remove ModelScope model download
+        if [ -d "${WORK_DIR}/CosyVoice2-0.5B" ]; then
+            log_info "  Removing CosyVoice2-0.5B/..."
+            rm -rf "${WORK_DIR}/CosyVoice2-0.5B"
+        fi
+
+        # Remove CosyVoice repo clone (scripts, not needed after build)
+        if [ -d "${WORK_DIR}/CosyVoice" ]; then
+            log_info "  Removing CosyVoice/ repo..."
+            rm -rf "${WORK_DIR}/CosyVoice"
+        fi
+
+        # Remove TRT weights (intermediate, not needed after engine build)
+        for weights_dir in "${WORK_DIR}"/trt_weights_*; do
+            if [ -d "$weights_dir" ]; then
+                log_info "  Removing $(basename $weights_dir)/..."
+                rm -rf "$weights_dir"
+            fi
+        done
+
+        # Show what's left
+        log_info "Kept engines for inference:"
+        ls -d "${WORK_DIR}"/trt_engines_* 2>/dev/null || log_info "  (no engines found)"
+
+        log_info ""
+        log_info "To also remove Docker image (~20GB): $0 cleanup --image"
+        exit 0
     fi
 
-    # Remove the TensorRT-LLM image (it's large ~20GB)
-    if [ "$REMOVE_IMAGE" = true ]; then
+    # --image: Remove the Docker image
+    if [ "$2" == "--image" ] || [ "$2" == "-i" ]; then
         log_info "Removing TensorRT-LLM image ${TRTLLM_IMAGE}..."
         docker rmi "${TRTLLM_IMAGE}" 2>/dev/null || true
         log_info "Image removed"
+        exit 0
     fi
 
-    # Show help if no options given
-    if [ "$REMOVE_BUILDS" = false ] && [ "$REMOVE_IMAGE" = false ]; then
-        echo ""
-        echo "Usage: $0 cleanup [OPTIONS]"
-        echo ""
-        echo "Options:"
-        echo "  --builds      Remove downloaded models, checkpoints, and engines"
-        echo "  --image       Remove Docker image (~20GB)"
-        echo "  --everything  Remove both builds and image"
-        echo ""
-        echo "Current disk usage:"
-        du -sh "${WORK_DIR}" 2>/dev/null || echo "  (no build directory)"
-        echo ""
-        docker images --format '{{.Repository}}:{{.Tag}} {{.Size}}' | grep tensorrt-llm || echo "  (no TensorRT-LLM image)"
+    # --all: Remove everything
+    if [ "$2" == "--all" ] || [ "$2" == "-a" ]; then
+        log_warn "Removing ALL build artifacts at ${WORK_DIR}..."
+        rm -rf "${WORK_DIR}"
+        log_info "Build directory removed"
+        log_info ""
+        log_info "To also remove Docker image: $0 cleanup --image"
+        exit 0
     fi
 
+    # Show help
+    echo "Usage: $0 cleanup [OPTION]"
+    echo ""
+    echo "Options:"
+    echo "  (none), --keep-engine, -k  Remove downloads/checkpoints, keep engines (default)"
+    echo "  --image, -i                Remove Docker image (~20GB)"
+    echo "  --all, -a                  Remove everything including engines"
+    echo ""
     exit 0
 fi
 
