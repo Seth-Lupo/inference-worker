@@ -302,6 +302,10 @@ build_engine() {
             TRTLLM_VERSION=\$(python3 -c 'import tensorrt_llm; print(tensorrt_llm.__version__)' 2>/dev/null | tail -1)
             echo \"TRT-LLM version: \${TRTLLM_VERSION}\"
 
+            echo '=== Upgrading transformers for Qwen3 support ==='
+            # Qwen3 requires transformers >= 4.51.0
+            pip install -q --upgrade 'transformers>=4.51.0' accelerate sentencepiece
+
             echo \"=== Cloning TRT-LLM examples (v\${TRTLLM_VERSION}) ===\"
             # Triton container has TRT-LLM runtime but not the conversion examples
             # Clone the matching version to get convert_checkpoint.py
