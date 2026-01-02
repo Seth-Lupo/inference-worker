@@ -1,8 +1,8 @@
 """
 Parakeet TDT 0.6B V2 - Triton Python Backend
 
-Uses ONNX Runtime with CUDA/TensorRT for GPU inference.
-Implements greedy transducer decoding without sherpa-onnx.
+Uses PyTorch with CUDA for GPU inference.
+Loads ONNX models via onnx2torch for native PyTorch execution.
 """
 import os
 import json
@@ -11,58 +11,44 @@ import triton_python_backend_utils as pb_utils
 
 
 class TritonPythonModel:
-    """Parakeet TDT ASR using ONNX Runtime GPU."""
+    """Parakeet TDT ASR using PyTorch GPU."""
 
     def initialize(self, args):
-        """Load ONNX models with GPU execution provider."""
-        import onnxruntime as ort
+        """Load ONNX models as PyTorch on CUDA."""
+        import torch
+        import onnx
+        from onnx2torch import convert
 
         self.model_config = json.loads(args["model_config"])
         model_dir = os.path.dirname(os.path.realpath(__file__))
 
+        # Check CUDA
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         pb_utils.Logger.log_info(f"Loading Parakeet models from {model_dir}")
-        pb_utils.Logger.log_info(f"ONNX Runtime providers: {ort.get_available_providers()}")
+        pb_utils.Logger.log_info(f"PyTorch device: {self.device}, CUDA available: {torch.cuda.is_available()}")
 
-        # Try GPU providers in order: TensorRT > CUDA > CPU
-        available = ort.get_available_providers()
-        providers = []
+        if torch.cuda.is_available():
+            pb_utils.Logger.log_info(f"CUDA device: {torch.cuda.get_device_name(0)}")
 
-        if "TensorrtExecutionProvider" in available:
-            providers.append(("TensorrtExecutionProvider", {
-                "device_id": 0,
-                "trt_max_workspace_size": 2 * 1024 * 1024 * 1024,  # 2GB
-                "trt_fp16_enable": True,
-            }))
-            pb_utils.Logger.log_info("TensorRT provider enabled")
+        # Load ONNX models and convert to PyTorch
+        pb_utils.Logger.log_info("Loading encoder...")
+        encoder_onnx = onnx.load(os.path.join(model_dir, "encoder.onnx"))
+        self.encoder = convert(encoder_onnx).to(self.device).eval()
 
-        if "CUDAExecutionProvider" in available:
-            providers.append(("CUDAExecutionProvider", {"device_id": 0}))
-            pb_utils.Logger.log_info("CUDA provider enabled")
+        pb_utils.Logger.log_info("Loading decoder...")
+        decoder_onnx = onnx.load(os.path.join(model_dir, "decoder.onnx"))
+        self.decoder = convert(decoder_onnx).to(self.device).eval()
 
-        providers.append("CPUExecutionProvider")
-        pb_utils.Logger.log_info(f"Provider order: {[p[0] if isinstance(p, tuple) else p for p in providers]}")
-
-        # Load transducer models
-        self.encoder = ort.InferenceSession(
-            os.path.join(model_dir, "encoder.onnx"),
-            providers=providers,
-        )
-        self.decoder = ort.InferenceSession(
-            os.path.join(model_dir, "decoder.onnx"),
-            providers=providers,
-        )
-        self.joiner = ort.InferenceSession(
-            os.path.join(model_dir, "joiner.onnx"),
-            providers=providers,
-        )
+        pb_utils.Logger.log_info("Loading joiner...")
+        joiner_onnx = onnx.load(os.path.join(model_dir, "joiner.onnx"))
+        self.joiner = convert(joiner_onnx).to(self.device).eval()
 
         # Load vocabulary
         self.vocab = self._load_vocab(os.path.join(model_dir, "tokens.txt"))
-        self.blank_id = 0  # Usually 0 for transducers
+        self.blank_id = 0
 
         pb_utils.Logger.log_info(
-            f"Parakeet initialized: vocab_size={len(self.vocab)}, "
-            f"using {self.encoder.get_providers()[0]}"
+            f"Parakeet initialized: vocab_size={len(self.vocab)}, device={self.device}"
         )
 
     def _load_vocab(self, path):
@@ -75,12 +61,13 @@ class TritonPythonModel:
                     token, idx = parts[0], int(parts[1])
                     vocab[idx] = token
                 elif len(parts) == 1:
-                    # Some formats have just the token, idx is line number
                     vocab[len(vocab)] = parts[0]
         return vocab
 
     def execute(self, requests):
         """Run inference on audio."""
+        import torch
+
         responses = []
 
         for request in requests:
@@ -92,7 +79,8 @@ class TritonPythonModel:
                 audio = audio / 32768.0
 
             # Transcribe
-            text = self._transcribe(audio)
+            with torch.no_grad():
+                text = self._transcribe(audio)
 
             output = pb_utils.Tensor("transcription", np.array([text], dtype=object))
             responses.append(pb_utils.InferenceResponse([output]))
@@ -100,37 +88,23 @@ class TritonPythonModel:
         return responses
 
     def _transcribe(self, audio):
-        """
-        Greedy transducer decoding.
+        """Greedy transducer decoding with PyTorch."""
+        import torch
 
-        Transducer: P(y|x) via encoder-decoder-joiner architecture.
-        """
-        # Encoder: audio -> encoder_out
-        # Input shape: [batch, time] or [batch, features, time]
-        audio_input = audio.reshape(1, -1)
-        audio_len = np.array([[audio_input.shape[1]]], dtype=np.int64)
+        # Convert to tensor
+        audio_tensor = torch.from_numpy(audio).unsqueeze(0).to(self.device)
+        audio_len = torch.tensor([[audio_tensor.shape[1]]], dtype=torch.long, device=self.device)
 
-        # Get encoder input names
-        enc_inputs = {inp.name: None for inp in self.encoder.get_inputs()}
-
-        if "audio_signal" in enc_inputs:
-            enc_inputs["audio_signal"] = audio_input
-        elif "input" in enc_inputs:
-            enc_inputs["input"] = audio_input
-        else:
-            # Use first input
-            enc_inputs[self.encoder.get_inputs()[0].name] = audio_input
-
-        # Add length if required
-        for inp in self.encoder.get_inputs():
-            if "length" in inp.name.lower() and inp.name not in enc_inputs:
-                enc_inputs[inp.name] = audio_len
-
-        # Remove None entries
-        enc_inputs = {k: v for k, v in enc_inputs.items() if v is not None}
-
+        # Encoder
         try:
-            encoder_out = self.encoder.run(None, enc_inputs)[0]
+            # Try common input names
+            try:
+                encoder_out = self.encoder(audio_tensor, audio_len)
+            except TypeError:
+                encoder_out = self.encoder(audio_tensor)
+
+            if isinstance(encoder_out, tuple):
+                encoder_out = encoder_out[0]
         except Exception as e:
             pb_utils.Logger.log_error(f"Encoder error: {e}")
             return ""
@@ -139,66 +113,45 @@ class TritonPythonModel:
         tokens = self._greedy_decode(encoder_out)
 
         # Convert to text
-        text = self._tokens_to_text(tokens)
-        return text
+        return self._tokens_to_text(tokens)
 
     def _greedy_decode(self, encoder_out):
-        """
-        Greedy transducer decoding.
+        """Greedy transducer decoding."""
+        import torch
 
-        At each encoder frame:
-        1. Run decoder on current hypothesis
-        2. Run joiner on (encoder_out, decoder_out)
-        3. Take argmax of joiner output
-        4. If not blank, append to hypothesis and repeat
-        5. If blank, move to next encoder frame
-        """
+        if encoder_out.dim() == 2:
+            encoder_out = encoder_out.unsqueeze(0)
+
         batch_size, num_frames, enc_dim = encoder_out.shape
-
-        # Initialize decoder state with blank
         tokens = []
-        decoder_input = np.array([[self.blank_id]], dtype=np.int64)
-
-        # Get decoder/joiner input names
-        dec_input_name = self.decoder.get_inputs()[0].name
-        join_enc_name = self.joiner.get_inputs()[0].name
-        join_dec_name = self.joiner.get_inputs()[1].name if len(self.joiner.get_inputs()) > 1 else None
+        decoder_input = torch.tensor([[self.blank_id]], dtype=torch.long, device=self.device)
 
         for t in range(num_frames):
-            enc_frame = encoder_out[:, t:t+1, :]  # [1, 1, enc_dim]
+            enc_frame = encoder_out[:, t:t+1, :]
 
-            # Limit iterations per frame to prevent infinite loops
-            for _ in range(10):
-                # Decoder
+            for _ in range(10):  # Max tokens per frame
                 try:
-                    decoder_out = self.decoder.run(None, {dec_input_name: decoder_input})[0]
+                    decoder_out = self.decoder(decoder_input)
+                    if isinstance(decoder_out, tuple):
+                        decoder_out = decoder_out[0]
                 except Exception:
                     break
 
-                # Joiner
                 try:
-                    if join_dec_name:
-                        joiner_out = self.joiner.run(None, {
-                            join_enc_name: enc_frame,
-                            join_dec_name: decoder_out,
-                        })[0]
-                    else:
-                        # Some joiners concatenate internally
-                        joiner_out = self.joiner.run(None, {join_enc_name: enc_frame})[0]
+                    joiner_out = self.joiner(enc_frame, decoder_out)
+                    if isinstance(joiner_out, tuple):
+                        joiner_out = joiner_out[0]
                 except Exception:
                     break
 
-                # Argmax
                 logits = joiner_out.squeeze()
-                token_id = int(np.argmax(logits))
+                token_id = int(torch.argmax(logits).item())
 
                 if token_id == self.blank_id:
-                    # Blank: move to next frame
                     break
                 else:
-                    # Non-blank: emit token, update decoder input
                     tokens.append(token_id)
-                    decoder_input = np.array([[token_id]], dtype=np.int64)
+                    decoder_input = torch.tensor([[token_id]], dtype=torch.long, device=self.device)
 
         return tokens
 
@@ -208,11 +161,9 @@ class TritonPythonModel:
         for tid in tokens:
             if tid in self.vocab:
                 token = self.vocab[tid]
-                # Skip special tokens
                 if token not in ["<blank>", "<unk>", "<s>", "</s>", "<pad>"]:
                     pieces.append(token)
 
-        # Join and handle SentencePiece markers
         text = "".join(pieces)
         text = text.replace("▁", " ").strip()
         return text

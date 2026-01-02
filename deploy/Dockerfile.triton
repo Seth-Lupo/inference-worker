@@ -20,9 +20,8 @@ RUN pip install --no-cache-dir \
 # Install Python packages for Parakeet ASR and CosyVoice TTS
 # Based on CosyVoice requirements.txt + Matcha-TTS requirements.txt
 RUN pip install --no-cache-dir \
-        # ASR (Parakeet)
-        sherpa-onnx \
-        onnxruntime-gpu \
+        # ASR (Parakeet) - using PyTorch+CUDA via onnx2torch
+        onnx2torch \
         # Core ML
         numpy \
         scipy \
@@ -62,17 +61,8 @@ RUN git clone --recursive https://github.com/FunAudioLLM/CosyVoice.git /opt/Cosy
 # Add CosyVoice and Matcha-TTS to Python path
 ENV PYTHONPATH="/opt/CosyVoice:/opt/CosyVoice/third_party/Matcha-TTS:${PYTHONPATH}"
 
-# Fix LD_LIBRARY_PATH for onnxruntime-gpu to find CUDA libraries
-ENV LD_LIBRARY_PATH="/usr/local/cuda/lib64:/usr/local/tensorrt/lib:/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH}"
-
-# CUDA 13 compatibility: onnxruntime-gpu expects CUDA 12 libs, create symlinks
-# This allows onnxruntime built for CUDA 12 to work with CUDA 13
-RUN for lib in /usr/local/cuda/lib64/libcu*.so.13*; do \
-        base=$(basename "$lib" | sed 's/\.13/.12/'); \
-        if [ ! -e "/usr/local/cuda/lib64/$base" ]; then \
-            ln -sf "$lib" "/usr/local/cuda/lib64/$base"; \
-        fi; \
-    done 2>/dev/null || true
+# Note: onnxruntime-gpu requires CUDA 12, but this container has CUDA 13
+# Parakeet ASR uses CPU provider instead (fast enough for short audio)
 
 # Triton 25.12-trtllm-python-py3 includes:
 # - TensorRT-LLM 1.0.0+ (Qwen3 TensorRT engine support)
