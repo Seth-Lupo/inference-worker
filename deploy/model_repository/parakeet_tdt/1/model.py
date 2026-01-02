@@ -46,15 +46,33 @@ class TritonPythonModel:
         tokens_path = os.path.join(model_dir, "tokens.txt")
 
         if all(os.path.exists(p) for p in [encoder_path, decoder_path, joiner_path, tokens_path]):
-            pb_utils.Logger.log_info("Using transducer model format")
-            self.recognizer = sherpa_onnx.OfflineRecognizer.from_transducer(
-                encoder=encoder_path,
-                decoder=decoder_path,
-                joiner=joiner_path,
-                tokens=tokens_path,
-                num_threads=4,
-                provider="cuda",
-            )
+            pb_utils.Logger.log_info("Using transducer model format with CUDA")
+            # Try CUDA first, fall back to CPU if it fails
+            try:
+                self.recognizer = sherpa_onnx.OfflineRecognizer.from_transducer(
+                    encoder=encoder_path,
+                    decoder=decoder_path,
+                    joiner=joiner_path,
+                    tokens=tokens_path,
+                    num_threads=4,
+                    provider="cuda",
+                )
+                pb_utils.Logger.log_info("sherpa-onnx CUDA provider initialized")
+            except Exception as e:
+                pb_utils.Logger.log_warn(f"CUDA provider failed: {e}, trying TensorRT")
+                try:
+                    self.recognizer = sherpa_onnx.OfflineRecognizer.from_transducer(
+                        encoder=encoder_path,
+                        decoder=decoder_path,
+                        joiner=joiner_path,
+                        tokens=tokens_path,
+                        num_threads=4,
+                        provider="tensorrt",
+                    )
+                    pb_utils.Logger.log_info("sherpa-onnx TensorRT provider initialized")
+                except Exception as e2:
+                    pb_utils.Logger.log_error(f"TensorRT also failed: {e2}")
+                    raise
         else:
             # Try single model format
             model_path = os.path.join(model_dir, "model.onnx")
