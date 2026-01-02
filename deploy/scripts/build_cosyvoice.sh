@@ -49,25 +49,53 @@ if [ "$1" == "cleanup" ] || [ "$1" == "clean" ]; then
         docker rm -f "${TRTLLM_CONTAINER_NAME}" 2>/dev/null || true
     fi
 
+    # Parse cleanup options
+    REMOVE_BUILDS=false
+    REMOVE_IMAGE=false
+
+    for arg in "$@"; do
+        case $arg in
+            --builds|--all|-a)
+                REMOVE_BUILDS=true
+                ;;
+            --image|-i)
+                REMOVE_IMAGE=true
+                ;;
+            --everything)
+                REMOVE_BUILDS=true
+                REMOVE_IMAGE=true
+                ;;
+        esac
+    done
+
+    # Remove build artifacts (models, checkpoints, engines)
+    if [ "$REMOVE_BUILDS" = true ]; then
+        log_warn "Removing all build artifacts at ${WORK_DIR}..."
+        rm -rf "${WORK_DIR}"
+        log_info "Build directory removed (models, checkpoints, engines)"
+    fi
+
     # Remove the TensorRT-LLM image (it's large ~20GB)
-    if [ "$2" == "--image" ] || [ "$2" == "-i" ]; then
+    if [ "$REMOVE_IMAGE" = true ]; then
         log_info "Removing TensorRT-LLM image ${TRTLLM_IMAGE}..."
         docker rmi "${TRTLLM_IMAGE}" 2>/dev/null || true
         log_info "Image removed"
-    else
-        log_info "To also remove the Docker image (~20GB), run:"
-        log_info "  $0 cleanup --image"
     fi
 
-    # Optionally remove build artifacts
-    if [ "$2" == "--all" ] || [ "$3" == "--all" ]; then
-        log_warn "Removing all build artifacts at ${WORK_DIR}..."
-        rm -rf "${WORK_DIR}"
-        log_info "Build directory removed"
-    else
-        log_info "Build artifacts preserved at ${WORK_DIR}"
-        log_info "To remove them, run:"
-        log_info "  $0 cleanup --all"
+    # Show help if no options given
+    if [ "$REMOVE_BUILDS" = false ] && [ "$REMOVE_IMAGE" = false ]; then
+        echo ""
+        echo "Usage: $0 cleanup [OPTIONS]"
+        echo ""
+        echo "Options:"
+        echo "  --builds      Remove downloaded models, checkpoints, and engines"
+        echo "  --image       Remove Docker image (~20GB)"
+        echo "  --everything  Remove both builds and image"
+        echo ""
+        echo "Current disk usage:"
+        du -sh "${WORK_DIR}" 2>/dev/null || echo "  (no build directory)"
+        echo ""
+        docker images --format '{{.Repository}}:{{.Tag}} {{.Size}}' | grep tensorrt-llm || echo "  (no TensorRT-LLM image)"
     fi
 
     exit 0
