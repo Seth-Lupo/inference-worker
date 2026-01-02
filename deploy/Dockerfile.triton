@@ -27,9 +27,10 @@ RUN pip install --no-cache-dir \
         omegaconf
 
 # Install CosyVoice and Matcha-TTS from source (not pip packages, just add to PYTHONPATH)
+# Use --only-binary for grpcio to prevent slow source builds
 RUN git clone --recursive https://github.com/FunAudioLLM/CosyVoice.git /opt/CosyVoice && \
     cd /opt/CosyVoice && \
-    pip install --no-cache-dir -r requirements.txt || true
+    pip install --no-cache-dir --only-binary grpcio -r requirements.txt || true
 
 # Add CosyVoice and Matcha-TTS to Python path
 ENV PYTHONPATH="/opt/CosyVoice:/opt/CosyVoice/third_party/Matcha-TTS:${PYTHONPATH}"
