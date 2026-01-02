@@ -33,7 +33,8 @@ if [ -f "${DEPLOY_DIR}/.env" ]; then
 fi
 
 # Configuration
-MODEL_NAME="Qwen/Qwen3-8B"
+MODEL_NAME="Qwen/Qwen3-8B-Instruct"
+MODEL_DIR_NAME="Qwen3-8B-Instruct"
 QUANTIZATION="${2:-int8_sq}"  # Options: fp8, int8_sq, int4_awq, none
 
 # =============================================================================
@@ -105,77 +106,106 @@ if [[ "$QUANTIZATION" == "fp8" ]]; then
 fi
 
 # =============================================================================
+# Check if model weights are complete (not just LFS pointers)
+# =============================================================================
+check_model_complete() {
+    local model_dir="$1"
+
+    # Check if any .safetensors file exists and is larger than 1MB (not a pointer)
+    if [ -d "$model_dir" ]; then
+        for f in "$model_dir"/*.safetensors "$model_dir"/model-*.safetensors; do
+            if [ -f "$f" ]; then
+                local size=$(stat -c%s "$f" 2>/dev/null || stat -f%z "$f" 2>/dev/null || echo "0")
+                if [ "$size" -gt 1000000 ]; then
+                    return 0  # Found a real weight file
+                fi
+            fi
+        done
+    fi
+    return 1  # No valid weight files found
+}
+
+# =============================================================================
 # Download Model
 # =============================================================================
 download_model() {
-    log_info "Downloading Qwen3-8B from HuggingFace..."
+    log_info "Downloading ${MODEL_NAME} from HuggingFace..."
 
-    if [ -d "${WORK_DIR}/Qwen3-8B" ] && [ -f "${WORK_DIR}/Qwen3-8B/config.json" ]; then
-        log_info "Model already exists at ${WORK_DIR}/Qwen3-8B"
-        return 0
+    local MODEL_PATH="${WORK_DIR}/${MODEL_DIR_NAME}"
+
+    # Check if model exists AND has actual weights (not just LFS pointers)
+    if [ -d "$MODEL_PATH" ] && [ -f "$MODEL_PATH/config.json" ]; then
+        if check_model_complete "$MODEL_PATH"; then
+            log_info "Model already exists with weights at $MODEL_PATH"
+            return 0
+        else
+            log_warn "Model directory exists but weights are missing (LFS pointers only)"
+            log_info "Attempting to pull LFS files..."
+
+            cd "$MODEL_PATH"
+            git lfs pull 2>/dev/null && {
+                if check_model_complete "$MODEL_PATH"; then
+                    log_info "LFS files pulled successfully"
+                    cd "${WORK_DIR}"
+                    return 0
+                fi
+            }
+            cd "${WORK_DIR}"
+
+            log_warn "LFS pull failed, removing incomplete download..."
+            rm -rf "$MODEL_PATH"
+        fi
     fi
 
-    mkdir -p "${WORK_DIR}/Qwen3-8B"
-
-    # Method 1: git clone with LFS (most reliable)
-    if command -v git &> /dev/null; then
-        log_info "Using git clone (requires git-lfs)..."
-
-        # Install git-lfs if needed
-        if ! command -v git-lfs &> /dev/null; then
-            log_warn "git-lfs not found, installing..."
-            sudo yum install -y git-lfs 2>/dev/null || sudo apt-get install -y git-lfs 2>/dev/null || {
-                log_warn "Could not install git-lfs automatically"
-            }
-        fi
-
-        git lfs install 2>/dev/null || true
-
-        # Clone with authentication if token provided
-        if [ -n "$HF_TOKEN" ]; then
-            GIT_URL="https://USER:${HF_TOKEN}@huggingface.co/${MODEL_NAME}"
-        else
-            GIT_URL="https://huggingface.co/${MODEL_NAME}"
-        fi
-
-        git clone --depth 1 "$GIT_URL" "${WORK_DIR}/Qwen3-8B" && {
-            log_info "Model downloaded via git clone"
-            return 0
+    # Ensure git-lfs is installed
+    if ! command -v git-lfs &> /dev/null; then
+        log_info "Installing git-lfs..."
+        sudo yum install -y git-lfs 2>/dev/null || sudo apt-get install -y git-lfs 2>/dev/null || {
+            log_error "Could not install git-lfs automatically"
+            log_info "Please install manually:"
+            log_info "  sudo yum install git-lfs  # Amazon Linux"
+            log_info "  sudo apt install git-lfs  # Ubuntu"
+            return 1
         }
     fi
 
-    # Method 2: huggingface-cli if available
-    if command -v huggingface-cli &> /dev/null; then
-        log_info "Using huggingface-cli..."
-        if [ -n "$HF_TOKEN" ]; then
-            huggingface-cli download ${MODEL_NAME} --local-dir "${WORK_DIR}/Qwen3-8B" --token "$HF_TOKEN"
-        else
-            huggingface-cli download ${MODEL_NAME} --local-dir "${WORK_DIR}/Qwen3-8B"
-        fi
-        return 0
+    git lfs install
+
+    # Clone with authentication if token provided
+    if [ -n "$HF_TOKEN" ]; then
+        GIT_URL="https://USER:${HF_TOKEN}@huggingface.co/${MODEL_NAME}"
+    else
+        GIT_URL="https://huggingface.co/${MODEL_NAME}"
     fi
 
-    # Method 3: Direct wget for essential files (minimal, may not have all weights)
-    log_warn "Neither git-lfs nor huggingface-cli available"
-    log_info "Attempting direct download of essential files..."
+    log_info "Cloning ${MODEL_NAME} (this will download ~16GB)..."
 
-    BASE_URL="https://huggingface.co/${MODEL_NAME}/resolve/main"
+    # Use GIT_LFS_SKIP_SMUDGE=0 to ensure LFS files are downloaded
+    GIT_LFS_SKIP_SMUDGE=0 git clone "$GIT_URL" "$MODEL_PATH" || {
+        log_error "git clone failed"
+        return 1
+    }
 
-    # Download config files
-    for file in config.json tokenizer.json tokenizer_config.json generation_config.json; do
-        curl -L -o "${WORK_DIR}/Qwen3-8B/${file}" "${BASE_URL}/${file}" 2>/dev/null || true
-    done
+    # Verify weights were downloaded
+    if ! check_model_complete "$MODEL_PATH"; then
+        log_warn "Weights not downloaded, trying git lfs pull..."
+        cd "$MODEL_PATH"
+        git lfs pull
+        cd "${WORK_DIR}"
 
-    log_error "Could not download model weights without git-lfs or huggingface-cli"
-    log_info ""
-    log_info "Please install git-lfs:"
-    log_info "  sudo yum install git-lfs  # Amazon Linux"
-    log_info "  sudo apt install git-lfs  # Ubuntu"
-    log_info ""
-    log_info "Or install huggingface-cli:"
-    log_info "  pip install huggingface_hub"
-    log_info ""
-    return 1
+        if ! check_model_complete "$MODEL_PATH"; then
+            log_error "Failed to download model weights"
+            log_info ""
+            log_info "Try manually:"
+            log_info "  cd ${MODEL_PATH}"
+            log_info "  git lfs pull"
+            log_info ""
+            return 1
+        fi
+    fi
+
+    log_info "Model downloaded successfully"
+    return 0
 }
 
 # =============================================================================
@@ -227,7 +257,7 @@ build_engine() {
         bash -c "
             set -e
 
-            MODEL_DIR=/workspace/build/Qwen3-8B
+            MODEL_DIR=/workspace/build/${MODEL_DIR_NAME}
             CHECKPOINT_DIR=/workspace/build/checkpoint_${QUANTIZATION}
             ENGINE_DIR=/workspace/build/engine_${QUANTIZATION}
 
