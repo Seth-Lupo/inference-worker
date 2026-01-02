@@ -1,6 +1,6 @@
 # Custom Triton image with TensorRT-LLM + Python dependencies
-# Using Triton 25.08 with TRT-LLM 0.21.0 (Qwen3 support requires >= 0.20.0)
-FROM nvcr.io/nvidia/tritonserver:25.08-trtllm-python-py3
+# Using Triton 25.12 with TRT-LLM 1.0.0+ (Qwen3 TensorRT engine support)
+FROM nvcr.io/nvidia/tritonserver:25.12-trtllm-python-py3
 
 # Install Python packages for Parakeet ASR and CosyVoice TTS
 RUN pip install --no-cache-dir \
@@ -10,9 +10,9 @@ RUN pip install --no-cache-dir \
     transformers \
     sentencepiece
 
-# Triton 25.08-trtllm-python-py3 includes:
-# - TensorRT-LLM 0.21.0 (Qwen3 support added in 0.20.0)
+# Triton 25.12-trtllm-python-py3 includes:
+# - TensorRT-LLM 1.0.0+ (Qwen3 TensorRT engine support)
 # - Triton Inference Server with tensorrtllm + python backends
 #
 # IMPORTANT: Engines must be built with matching TRT-LLM version!
-# Use build container: nvcr.io/nvidia/tritonserver:25.08-trtllm-python-py3
+# Use build container: nvcr.io/nvidia/tritonserver:25.12-trtllm-python-py3

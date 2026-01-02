@@ -24,9 +24,9 @@ log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
 # Container configuration
 # IMPORTANT: Use Triton container for building to guarantee version match!
-# Qwen3 requires TRT-LLM >= 0.20.0 (added Qwen3 support)
-# Triton 25.08-trtllm-python-py3 has TRT-LLM 0.21.0
-TRTLLM_IMAGE="nvcr.io/nvidia/tritonserver:25.08-trtllm-python-py3"
+# Qwen3 TensorRT engine requires TRT-LLM >= 1.0.0
+# Triton 25.12-trtllm-python-py3 is the latest release
+TRTLLM_IMAGE="nvcr.io/nvidia/tritonserver:25.12-trtllm-python-py3"
 TRTLLM_CONTAINER_NAME="trtllm-builder-qwen3"
 
 # Load environment

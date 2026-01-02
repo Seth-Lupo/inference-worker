@@ -107,8 +107,8 @@ log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 # Container configuration
 # IMPORTANT: Use Triton container for building to guarantee version match!
 # Using same container as build ensures engine compatibility
-# Triton 25.08-trtllm-python-py3 has TRT-LLM 0.21.0
-TRTLLM_IMAGE="nvcr.io/nvidia/tritonserver:25.08-trtllm-python-py3"
+# Triton 25.12-trtllm-python-py3 is the latest release
+TRTLLM_IMAGE="nvcr.io/nvidia/tritonserver:25.12-trtllm-python-py3"
 TRTLLM_CONTAINER_NAME="trtllm-builder-cosyvoice"
 
 # Load environment
