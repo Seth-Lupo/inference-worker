@@ -1,14 +1,4 @@
-"""
-TTS (Text-to-Speech) module.
+"""TTS module - CosyVoice 2 via Triton."""
+from .cosyvoice_tts import CosyVoiceTTS, TTSConfig, AudioChunk, create_cosyvoice_tts
 
-Provides TTSRail implementations:
-- MockTTS: Generates beep sounds for testing
-- CosyVoiceTTS: Real TTS via Triton/CosyVoice2
-"""
-from .cosyvoice_tts import CosyVoiceTTS, CosyVoiceConfig, AudioChunk
-
-__all__ = [
-    "CosyVoiceTTS",
-    "CosyVoiceConfig",
-    "AudioChunk",
-]
+__all__ = ["CosyVoiceTTS", "TTSConfig", "AudioChunk", "create_cosyvoice_tts"]
