@@ -1,10 +1,13 @@
 """
 TTS Rail - Mock implementation that generates a beep sound.
 """
-import asyncio
+import logging
+import time
 import numpy as np
 from dataclasses import dataclass
 from typing import AsyncIterator
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -23,14 +26,16 @@ class TTSRail:
     SAMPLE_RATE = 16000
     BEEP_FREQUENCY = 440  # A4 note
     BEEP_DURATION = 1.0   # seconds
-    CHUNK_DURATION = 0.02  # 20ms chunks
 
     def __init__(self):
         self._interrupted = False
         self._is_speaking = False
+        logger.debug("TTSRail initialized")
 
     def _generate_beep(self) -> bytes:
         """Generate a 1-second 440Hz beep as PCM16 audio."""
+        start_time = time.perf_counter()
+
         num_samples = int(self.SAMPLE_RATE * self.BEEP_DURATION)
         t = np.linspace(0, self.BEEP_DURATION, num_samples, dtype=np.float32)
 
@@ -45,6 +50,10 @@ class TTSRail:
 
         # Convert to PCM16
         audio_int16 = (audio * 32767).astype(np.int16)
+
+        elapsed_ms = (time.perf_counter() - start_time) * 1000
+        logger.debug(f"Beep generated: {len(audio_int16)} samples in {elapsed_ms:.2f}ms")
+
         return audio_int16.tobytes()
 
     async def synthesize(self, text: str) -> AsyncIterator[AudioChunk]:
@@ -57,40 +66,32 @@ class TTSRail:
         Yields:
             AudioChunk with PCM16 audio data
         """
+        start_time = time.perf_counter()
         self._interrupted = False
         self._is_speaking = True
+
+        logger.debug(f"TTS synthesize called with: '{text}'")
 
         try:
             # Generate full beep
             beep_audio = self._generate_beep()
 
-            # Stream in chunks
-            chunk_size = int(self.SAMPLE_RATE * self.CHUNK_DURATION * 2)  # *2 for PCM16
-            num_chunks = len(beep_audio) // chunk_size
+            # Send all audio at once for minimal latency
+            # (In production, you'd stream chunks as they're generated)
+            logger.debug(f"TTS emitting {len(beep_audio)} bytes of audio")
 
-            for i in range(num_chunks + 1):
-                if self._interrupted:
-                    return
+            yield AudioChunk(data=beep_audio, is_final=True)
 
-                start = i * chunk_size
-                end = min(start + chunk_size, len(beep_audio))
-
-                if start >= len(beep_audio):
-                    break
-
-                chunk_data = beep_audio[start:end]
-                is_final = end >= len(beep_audio)
-
-                yield AudioChunk(data=chunk_data, is_final=is_final)
-
-                # Simulate real-time streaming
-                await asyncio.sleep(self.CHUNK_DURATION)
+            elapsed_ms = (time.perf_counter() - start_time) * 1000
+            logger.info(f"TTS synthesis complete in {elapsed_ms:.2f}ms")
 
         finally:
             self._is_speaking = False
+            logger.debug("TTS finished speaking")
 
     def interrupt(self) -> None:
         """Interrupt ongoing synthesis (for barge-in)."""
+        logger.debug("TTS interrupted")
         self._interrupted = True
 
     @property
@@ -100,5 +101,6 @@ class TTSRail:
 
     def reset(self) -> None:
         """Reset internal state."""
+        logger.debug("TTS reset")
         self._interrupted = False
         self._is_speaking = False

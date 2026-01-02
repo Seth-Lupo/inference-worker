@@ -1,9 +1,12 @@
 """
 LLM Rail - Mock implementation that returns fixed text.
 """
-import asyncio
+import logging
+import time
 from dataclasses import dataclass
 from typing import AsyncIterator, Optional
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -21,6 +24,7 @@ class LLMRail:
 
     def __init__(self):
         self._interrupted = False
+        logger.debug("LLMRail initialized")
 
     async def generate(
         self,
@@ -37,29 +41,27 @@ class LLMRail:
         Yields:
             LLMEvent with generated text
         """
+        start_time = time.perf_counter()
         self._interrupted = False
 
-        # Simulate streaming token generation
+        logger.debug(f"LLM generate called with: '{user_text}'")
+
+        # Mock response - no delay for speed
         response = "This is LLM test"
 
-        # Stream word by word
-        words = response.split()
-        for i, word in enumerate(words):
-            if self._interrupted:
-                return
+        # Emit full response at once for minimal latency
+        logger.debug(f"LLM emitting response: '{response}'")
+        yield LLMEvent(text=response, is_complete=True)
 
-            await asyncio.sleep(0.02)  # Simulate token generation time
-
-            is_last = i == len(words) - 1
-            yield LLMEvent(
-                text=word + ("" if is_last else " "),
-                is_complete=is_last
-            )
+        elapsed_ms = (time.perf_counter() - start_time) * 1000
+        logger.info(f"LLM generation complete in {elapsed_ms:.2f}ms")
 
     def interrupt(self) -> None:
         """Interrupt ongoing generation (for barge-in)."""
+        logger.debug("LLM interrupted")
         self._interrupted = True
 
     def reset(self) -> None:
         """Reset internal state."""
+        logger.debug("LLM reset")
         self._interrupted = False

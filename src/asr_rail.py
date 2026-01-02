@@ -1,9 +1,12 @@
 """
 ASR Rail - Mock implementation that returns fixed text.
 """
-import asyncio
+import logging
+import time
 from dataclasses import dataclass
-from typing import AsyncIterator, Protocol
+from typing import AsyncIterator
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -21,6 +24,7 @@ class ASRRail:
 
     def __init__(self):
         self._buffer: bytes = b""
+        logger.debug("ASRRail initialized")
 
     async def transcribe(self, audio_data: bytes) -> AsyncIterator[TranscriptEvent]:
         """
@@ -32,15 +36,22 @@ class ASRRail:
         Yields:
             TranscriptEvent with transcription
         """
-        # Simulate some processing delay
-        await asyncio.sleep(0.05)
+        start_time = time.perf_counter()
+        audio_duration_ms = (len(audio_data) / 2) / 16  # PCM16 = 2 bytes/sample, 16kHz
 
-        # Return mock transcription
-        yield TranscriptEvent(
-            text="This is ASR Test",
-            is_final=True
-        )
+        logger.debug(f"ASR transcribe called: {len(audio_data)} bytes ({audio_duration_ms:.0f}ms of audio)")
+
+        # Mock transcription - no delay
+        response = "This is ASR Test"
+
+        elapsed_ms = (time.perf_counter() - start_time) * 1000
+        logger.debug(f"ASR emitting transcript: '{response}' ({elapsed_ms:.2f}ms)")
+
+        yield TranscriptEvent(text=response, is_final=True)
+
+        logger.info(f"ASR transcription complete in {elapsed_ms:.2f}ms")
 
     def reset(self) -> None:
         """Reset internal state."""
+        logger.debug("ASR reset")
         self._buffer = b""

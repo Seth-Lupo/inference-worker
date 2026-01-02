@@ -1,11 +1,15 @@
 """
 Silero VAD wrapper for voice activity detection.
 """
+import logging
+import time
 import torch
 import numpy as np
 from enum import Enum
 from typing import Optional
 from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
 
 
 class VADState(Enum):
@@ -49,6 +53,8 @@ class SileroVAD:
         self.min_silence_samples = int(min_silence_duration_ms * self.SAMPLE_RATE / 1000)
 
         # Load Silero VAD model
+        logger.debug("Loading Silero VAD model...")
+        load_start = time.perf_counter()
         self.model, _ = torch.hub.load(
             repo_or_dir='snakers4/silero-vad',
             model='silero_vad',
@@ -56,6 +62,7 @@ class SileroVAD:
             trust_repo=True,
         )
         self.model.eval()
+        logger.info(f"Silero VAD loaded in {(time.perf_counter() - load_start)*1000:.1f}ms")
 
         # State tracking
         self._state = VADState.IDLE
@@ -65,6 +72,7 @@ class SileroVAD:
 
     def reset(self) -> None:
         """Reset VAD state for new session."""
+        logger.debug("VAD reset")
         self.model.reset_states()
         self._state = VADState.IDLE
         self._speech_samples = 0
@@ -87,12 +95,16 @@ class SileroVAD:
         audio_tensor = torch.from_numpy(audio_float)
 
         # Run VAD
+        start_time = time.perf_counter()
         with torch.no_grad():
             probability = self.model(audio_tensor, self.SAMPLE_RATE).item()
+        inference_ms = (time.perf_counter() - start_time) * 1000
 
         self._last_probability = probability
         is_speech = probability >= self.threshold
         chunk_samples = len(audio_int16)
+
+        logger.debug(f"VAD: prob={probability:.3f} speech={is_speech} state={self._state.value} ({inference_ms:.2f}ms)")
 
         # State machine
         previous_state = self._state
@@ -122,6 +134,7 @@ class SileroVAD:
 
         # Return event if state changed
         if self._state != previous_state:
+            logger.info(f"VAD state change: {previous_state.value} -> {self._state.value} (prob={probability:.3f})")
             return VADEvent(state=self._state, confidence=probability)
 
         return None
