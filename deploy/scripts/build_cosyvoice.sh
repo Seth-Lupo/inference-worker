@@ -105,8 +105,9 @@ log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
 # Container configuration
-# Use dedicated TensorRT-LLM development container for building engines
-TRTLLM_IMAGE="nvcr.io/nvidia/tensorrt-llm/release:1.2.0rc6"
+# IMPORTANT: Use same TRT-LLM version as Triton serving container!
+# Triton 24.12 has TRT-LLM 0.16.0, so use matching build container
+TRTLLM_IMAGE="nvcr.io/nvidia/tritonserver:24.12-trtllm-python-py3"
 TRTLLM_CONTAINER_NAME="trtllm-builder-cosyvoice"
 
 # Load environment
