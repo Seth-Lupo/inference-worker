@@ -17,8 +17,8 @@ set -e
 # Use INT8 quantized version (smaller, slightly less accurate)
 USE_INT8="${USE_INT8:-false}"
 
-# Sherpa-ONNX release version
-SHERPA_VERSION="v1.10.30"
+# Sherpa-ONNX release tag for ASR models
+SHERPA_VERSION="asr-models"
 
 # Model name in Triton
 MODEL_NAME="parakeet_tdt"
@@ -141,8 +141,10 @@ download_from_sherpa() {
         # INT8 quantized version (smaller, slightly less accurate)
         ARCHIVE="sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8.tar.bz2"
     else
-        # FP16 version
-        ARCHIVE="sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-fp16.tar.bz2"
+        # INT8 is the only available quantization from sherpa-onnx
+        # (no FP16/FP32 pre-built available)
+        ARCHIVE="sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8.tar.bz2"
+        log_info "Note: Using INT8 version (only quantization available from sherpa-onnx)"
     fi
 
     DOWNLOAD_URL="${SHERPA_BASE}/${SHERPA_VERSION}/${ARCHIVE}"
