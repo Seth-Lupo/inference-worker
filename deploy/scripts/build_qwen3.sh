@@ -1,317 +1,159 @@
 #!/bin/bash
 # =============================================================================
-# Build Qwen3 8B TensorRT-LLM Engine
-# Uses dedicated TensorRT-LLM development container for building
-# Based on: https://github.com/NVIDIA/TensorRT-LLM
-#           https://github.com/NVIDIA/TensorRT-Model-Optimizer
+# Build Qwen3 8B TensorRT-LLM Engine (LLM Model)
+#
+# Downloads model from HuggingFace, quantizes, and builds TensorRT engine.
+# Uses the Triton TRT-LLM container for building to ensure compatibility.
+#
+# Sources:
+#   - https://github.com/NVIDIA/TensorRT-LLM
+#   - https://huggingface.co/Qwen/Qwen3-8B
 # =============================================================================
-set -e
+
+# Load shared utilities
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/common.sh"
 
 # =============================================================================
-# CONFIGURATION - Edit these values as needed
+# Configuration
 # =============================================================================
-
-# Model to download from HuggingFace
-# Note: Qwen3-8B is already instruct-capable (no separate -Instruct variant)
-# Qwen3-8B-Base is the pretrained-only version
 MODEL_NAME="${MODEL_NAME:-Qwen/Qwen3-8B}"
 MODEL_DIR_NAME="${MODEL_DIR_NAME:-Qwen3-8B}"
-
-# Quantization method (can override with first argument)
-# Options: fp8 (Hopper/Ada), int8_sq (good balance), int4 (smallest), none (FP16)
 QUANTIZATION="${QUANTIZATION:-int4}"
 
-# Triton container for building (ensures engine compatibility)
-# IMPORTANT: Must match the container used for serving!
+# Build container (must match serving container for engine compatibility)
 TRTLLM_IMAGE="${TRTLLM_IMAGE:-nvcr.io/nvidia/tritonserver:25.12-trtllm-python-py3}"
 TRTLLM_CONTAINER_NAME="trtllm-builder-qwen3"
 
-# TensorRT-LLM build parameters
+# Engine build parameters
 MAX_BATCH_SIZE="${MAX_BATCH_SIZE:-8}"
 MAX_INPUT_LEN="${MAX_INPUT_LEN:-4096}"
 MAX_SEQ_LEN="${MAX_SEQ_LEN:-8192}"
 
-# KV cache configuration
-KV_CACHE_FREE_GPU_MEM_FRACTION="${KV_CACHE_FREE_GPU_MEM_FRACTION:-0.8}"
-MAX_TOKENS_IN_PAGED_KV_CACHE="${MAX_TOKENS_IN_PAGED_KV_CACHE:-8192}"
+# KV cache settings
+KV_CACHE_FREE_GPU_MEM_FRACTION="${KV_CACHE_FREE_GPU_MEM_FRACTION:-0.5}"
+
+# Paths
+readonly DEPLOY_DIR="$(get_deploy_dir)"
+readonly WORK_DIR="${DEPLOY_DIR}/qwen3_build"
+readonly MODEL_REPO="${DEPLOY_DIR}/model_repository/qwen3_8b"
 
 # =============================================================================
-# PATHS - Derived from script location
+# Load environment and parse args
 # =============================================================================
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DEPLOY_DIR="$(dirname "$SCRIPT_DIR")"
-WORK_DIR="${DEPLOY_DIR}/qwen3_build"
-MODEL_REPO="${DEPLOY_DIR}/model_repository"
+load_env
 
-# =============================================================================
-# Logging
-# =============================================================================
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-RED='\033[0;31m'
-NC='\033[0m'
-
-log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
-log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
-log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
-
-# Load environment variables from .env file
-if [ -f "${DEPLOY_DIR}/.env" ]; then
-    source "${DEPLOY_DIR}/.env"
+# Override quantization from command line
+if [[ -n "${1:-}" && "$1" != "cleanup" && "$1" != "clean" ]]; then
+    QUANTIZATION="$1"
 fi
 
-# Override QUANTIZATION from command line if provided
-[ -n "$1" ] && [[ "$1" != "cleanup" ]] && [[ "$1" != "clean" ]] && QUANTIZATION="$1"
-
 # =============================================================================
-# Handle cleanup command
+# Cleanup Handler
 # =============================================================================
-if [ "$1" == "cleanup" ] || [ "$1" == "clean" ]; then
+if [[ "${1:-}" == "cleanup" || "${1:-}" == "clean" ]]; then
     echo "=============================================="
     echo "Cleaning up Qwen3 build artifacts"
     echo "=============================================="
 
-    # Stop and remove container if running
-    if docker ps -a --format '{{.Names}}' | grep -q "^${TRTLLM_CONTAINER_NAME}$"; then
-        log_info "Removing container ${TRTLLM_CONTAINER_NAME}..."
-        docker rm -f "${TRTLLM_CONTAINER_NAME}" 2>/dev/null || true
-    fi
+    remove_container "$TRTLLM_CONTAINER_NAME"
 
-    # --keep-engine: Remove downloads/checkpoints but keep built engine (default)
-    if [ "$2" == "--keep-engine" ] || [ "$2" == "-k" ] || [ -z "$2" ]; then
-        log_info "Removing downloaded model and checkpoints (keeping engine)..."
-
-        # Remove HuggingFace model download (~16GB)
-        if [ -d "${WORK_DIR}/${MODEL_DIR_NAME}" ]; then
-            log_info "  Removing ${MODEL_DIR_NAME}/ (~16GB)..."
+    case "${2:-}" in
+        --all|-a)
+            log_warn "Removing ALL build artifacts..."
+            rm -rf "$WORK_DIR"
+            log_info "Build directory removed"
+            ;;
+        --image|-i)
+            log_info "Removing Docker image: $TRTLLM_IMAGE"
+            docker rmi "$TRTLLM_IMAGE" 2>/dev/null || true
+            ;;
+        *)
+            log_info "Removing model download and checkpoints (keeping engine)..."
             rm -rf "${WORK_DIR}/${MODEL_DIR_NAME}"
-        fi
-
-        # Remove quantization checkpoints
-        for checkpoint_dir in "${WORK_DIR}"/checkpoint_*; do
-            if [ -d "$checkpoint_dir" ]; then
-                log_info "  Removing $(basename $checkpoint_dir)/..."
-                rm -rf "$checkpoint_dir"
-            fi
-        done
-
-        # Show what's left
-        log_info "Kept engines for inference:"
-        ls -d "${WORK_DIR}"/engine_* 2>/dev/null || log_info "  (no engines found)"
-
-        log_info ""
-        log_info "To also remove Docker image (~20GB): $0 cleanup --image"
-        exit 0
-    fi
-
-    # --image: Remove the Docker image
-    if [ "$2" == "--image" ] || [ "$2" == "-i" ]; then
-        log_info "Removing TensorRT-LLM image ${TRTLLM_IMAGE}..."
-        docker rmi "${TRTLLM_IMAGE}" 2>/dev/null || true
-        log_info "Image removed"
-        exit 0
-    fi
-
-    # --all: Remove everything
-    if [ "$2" == "--all" ] || [ "$2" == "-a" ]; then
-        log_warn "Removing ALL build artifacts at ${WORK_DIR}..."
-        rm -rf "${WORK_DIR}"
-        log_info "Build directory removed"
-        log_info ""
-        log_info "To also remove Docker image: $0 cleanup --image"
-        exit 0
-    fi
-
-    # Show help
-    echo "Usage: $0 cleanup [OPTION]"
-    echo ""
-    echo "Options:"
-    echo "  (none), --keep-engine, -k  Remove downloads/checkpoints, keep engines (default)"
-    echo "  --image, -i                Remove Docker image (~20GB)"
-    echo "  --all, -a                  Remove everything including engines"
-    echo ""
+            rm -rf "${WORK_DIR}"/checkpoint_*
+            log_info "Kept: ${WORK_DIR}/engine_*"
+            ;;
+    esac
     exit 0
 fi
 
-echo "=============================================="
-echo "Building Qwen3 8B TensorRT-LLM Engine"
-echo "=============================================="
-echo "Model: ${MODEL_NAME}"
-echo "Quantization: ${QUANTIZATION}"
-echo "Build container: ${TRTLLM_IMAGE}"
-echo ""
-echo "To cleanup after building:"
-echo "  $0 cleanup          # Remove container only"
-echo "  $0 cleanup --image  # Also remove Docker image (~20GB)"
-echo "  $0 cleanup --all    # Remove everything including downloads"
-echo ""
-
-mkdir -p "${WORK_DIR}"
-
 # =============================================================================
-# Check GPU Capability
+# Functions
 # =============================================================================
-log_info "Checking GPU capability..."
-GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)
-log_info "GPU: ${GPU_NAME}"
 
-# FP8 requires Hopper (H100) or Ada (L4, L40)
-if [[ "$QUANTIZATION" == "fp8" ]]; then
-    if [[ ! "$GPU_NAME" =~ (H100|H200|L4|L40|RTX\ 40) ]]; then
-        log_warn "FP8 quantization works best on Hopper/Ada GPUs"
-        log_warn "For older GPUs (A100, T4, V100), consider using int8_sq or int4_awq"
-    fi
-fi
-
-# =============================================================================
-# Check if model weights are complete (not just LFS pointers)
-# =============================================================================
-check_model_complete() {
-    local model_dir="$1"
-
-    # Check if any .safetensors file exists and is larger than 1MB (not a pointer)
-    if [ -d "$model_dir" ]; then
-        for f in "$model_dir"/*.safetensors "$model_dir"/model-*.safetensors; do
-            if [ -f "$f" ]; then
-                local size=$(stat -c%s "$f" 2>/dev/null || stat -f%z "$f" 2>/dev/null || echo "0")
-                if [ "$size" -gt 1000000 ]; then
-                    return 0  # Found a real weight file
-                fi
-            fi
-        done
-    fi
-    return 1  # No valid weight files found
-}
-
-# =============================================================================
-# Download Model
-# =============================================================================
 download_model() {
-    log_info "Downloading ${MODEL_NAME} from HuggingFace..."
+    log_step "Downloading ${MODEL_NAME} from HuggingFace..."
 
-    local MODEL_PATH="${WORK_DIR}/${MODEL_DIR_NAME}"
+    local model_path="${WORK_DIR}/${MODEL_DIR_NAME}"
 
-    # Check if model exists AND has actual weights (not just LFS pointers)
-    if [ -d "$MODEL_PATH" ] && [ -f "$MODEL_PATH/config.json" ]; then
-        if check_model_complete "$MODEL_PATH"; then
-            log_info "Model already exists with weights at $MODEL_PATH"
+    # Check if already downloaded with real weights
+    if has_real_weights "$model_path" "*.safetensors"; then
+        log_info "Model already exists at $model_path"
+        return 0
+    fi
+
+    # Try to pull LFS if directory exists but weights are pointers
+    if [[ -d "$model_path" ]]; then
+        log_warn "Model directory exists but weights missing, trying LFS pull..."
+        if lfs_pull "$model_path" && has_real_weights "$model_path" "*.safetensors"; then
+            log_info "LFS pull successful"
             return 0
-        else
-            log_warn "Model directory exists but weights are missing (LFS pointers only)"
-            log_info "Attempting to pull LFS files..."
-
-            cd "$MODEL_PATH"
-            git lfs pull 2>/dev/null && {
-                if check_model_complete "$MODEL_PATH"; then
-                    log_info "LFS files pulled successfully"
-                    cd "${WORK_DIR}"
-                    return 0
-                fi
-            }
-            cd "${WORK_DIR}"
-
-            log_warn "LFS pull failed, removing incomplete download..."
-            rm -rf "$MODEL_PATH"
         fi
+        log_warn "LFS pull failed, removing incomplete download..."
+        rm -rf "$model_path"
     fi
 
-    # Ensure git-lfs is installed
-    if ! command -v git-lfs &> /dev/null; then
-        log_info "Installing git-lfs..."
-        sudo yum install -y git-lfs 2>/dev/null || sudo apt-get install -y git-lfs 2>/dev/null || {
-            log_error "Could not install git-lfs automatically"
-            log_info "Please install manually:"
-            log_info "  sudo yum install git-lfs  # Amazon Linux"
-            log_info "  sudo apt install git-lfs  # Ubuntu"
-            return 1
-        }
-    fi
+    mkdir -p "$WORK_DIR"
 
-    git lfs install
-
-    # Clone with authentication if token provided
-    if [ -n "$HF_TOKEN" ]; then
-        GIT_URL="https://USER:${HF_TOKEN}@huggingface.co/${MODEL_NAME}"
-    else
-        GIT_URL="https://huggingface.co/${MODEL_NAME}"
-    fi
-
-    log_info "Cloning ${MODEL_NAME} (this will download ~16GB)..."
-
-    # Use GIT_LFS_SKIP_SMUDGE=0 to ensure LFS files are downloaded
-    GIT_LFS_SKIP_SMUDGE=0 git clone "$GIT_URL" "$MODEL_PATH" || {
-        log_error "git clone failed"
+    # Clone from HuggingFace
+    hf_clone "$MODEL_NAME" "$model_path" "${HF_TOKEN:-}" || {
+        log_error "Failed to clone model"
         return 1
     }
 
     # Verify weights were downloaded
-    if ! check_model_complete "$MODEL_PATH"; then
-        log_warn "Weights not downloaded, trying git lfs pull..."
-        cd "$MODEL_PATH"
-        git lfs pull
-        cd "${WORK_DIR}"
+    if ! has_real_weights "$model_path" "*.safetensors"; then
+        log_warn "Weights not downloaded, trying LFS pull..."
+        lfs_pull "$model_path"
 
-        if ! check_model_complete "$MODEL_PATH"; then
+        if ! has_real_weights "$model_path" "*.safetensors"; then
             log_error "Failed to download model weights"
-            log_info ""
-            log_info "Try manually:"
-            log_info "  cd ${MODEL_PATH}"
-            log_info "  git lfs pull"
-            log_info ""
+            log_info "Try: cd ${model_path} && git lfs pull"
             return 1
         fi
     fi
 
     log_info "Model downloaded successfully"
-    return 0
 }
 
-# =============================================================================
-# Pull TensorRT-LLM Development Container
-# =============================================================================
-pull_container() {
-    log_info "Checking for TensorRT-LLM development container..."
-
-    if docker images --format '{{.Repository}}:{{.Tag}}' | grep -q "^${TRTLLM_IMAGE}$"; then
-        log_info "Container image already exists"
-    else
-        log_info "Pulling ${TRTLLM_IMAGE} (this may take a while, ~20GB)..."
-        docker pull "${TRTLLM_IMAGE}"
-    fi
-}
-
-# =============================================================================
-# Quantize and Build Engine
-# =============================================================================
 build_engine() {
-    log_info "Building TensorRT-LLM engine with ${QUANTIZATION} quantization..."
+    log_step "Building TensorRT-LLM engine (${QUANTIZATION})..."
 
-    CHECKPOINT_DIR="${WORK_DIR}/checkpoint_${QUANTIZATION}"
-    ENGINE_DIR="${WORK_DIR}/engine_${QUANTIZATION}"
+    local checkpoint_dir="${WORK_DIR}/checkpoint_${QUANTIZATION}"
+    local engine_dir="${WORK_DIR}/engine_${QUANTIZATION}"
 
     # Check if engine already exists
-    if [ -d "${ENGINE_DIR}" ] && [ -f "${ENGINE_DIR}/rank0.engine" ]; then
-        log_info "Engine already exists at ${ENGINE_DIR}"
-        log_info "Delete the directory to rebuild"
+    if [[ -f "${engine_dir}/rank0.engine" ]]; then
+        log_info "Engine already exists at ${engine_dir}"
+        log_info "Delete directory to rebuild: rm -rf ${engine_dir}"
         return 0
     fi
 
-    # Ensure we have the container
-    pull_container
+    # Ensure container image exists
+    ensure_docker_image "$TRTLLM_IMAGE"
 
-    # Run quantization and build inside dedicated TensorRT-LLM development container
-    # This container has all the quantization tools (ModelOpt) pre-installed
-    log_info "Starting build in container ${TRTLLM_IMAGE}..."
+    log_info "Starting build in container..."
 
     docker run --rm --gpus all \
-        --name "${TRTLLM_CONTAINER_NAME}" \
+        --name "$TRTLLM_CONTAINER_NAME" \
         --shm-size=16g \
         --ulimit memlock=-1 \
         --ulimit stack=67108864 \
         -v "${WORK_DIR}:/workspace/build" \
         -w /workspace \
-        -e HF_TOKEN="${HF_TOKEN}" \
-        "${TRTLLM_IMAGE}" \
+        -e HF_TOKEN="${HF_TOKEN:-}" \
+        "$TRTLLM_IMAGE" \
         bash -c "
             set -e
 
@@ -319,85 +161,73 @@ build_engine() {
             CHECKPOINT_DIR=/workspace/build/checkpoint_${QUANTIZATION}
             ENGINE_DIR=/workspace/build/engine_${QUANTIZATION}
 
-            echo '=== TensorRT-LLM Version Check ==='
-            # Suppress TRT-LLM banner, extract only version number
+            echo '=== TensorRT-LLM Version ==='
             TRTLLM_VERSION=\$(python3 -c 'import tensorrt_llm; print(tensorrt_llm.__version__)' 2>/dev/null | tail -1)
-            echo \"TRT-LLM version: \${TRTLLM_VERSION}\"
+            echo \"TRT-LLM: \${TRTLLM_VERSION}\"
 
             echo '=== Installing dependencies ==='
             pip install -q accelerate sentencepiece 2>/dev/null || true
 
-            echo \"=== Cloning TRT-LLM examples (v\${TRTLLM_VERSION}) ===\"
-            # Triton container has TRT-LLM runtime but not the conversion examples
-            # Clone the matching version to get convert_checkpoint.py
-            if [ ! -d '/workspace/TensorRT-LLM' ]; then
-                git clone --depth 1 --branch \"v\${TRTLLM_VERSION}\" https://github.com/NVIDIA/TensorRT-LLM.git /workspace/TensorRT-LLM || \
-                git clone --depth 1 --branch \"release/\${TRTLLM_VERSION}\" https://github.com/NVIDIA/TensorRT-LLM.git /workspace/TensorRT-LLM || \
+            echo '=== Cloning TRT-LLM examples ==='
+            if [[ ! -d '/workspace/TensorRT-LLM' ]]; then
+                git clone --depth 1 --branch \"v\${TRTLLM_VERSION}\" https://github.com/NVIDIA/TensorRT-LLM.git /workspace/TensorRT-LLM 2>/dev/null || \
                 git clone --depth 1 https://github.com/NVIDIA/TensorRT-LLM.git /workspace/TensorRT-LLM
             fi
 
-            # Find qwen convert script (path varies by version)
+            # Find qwen convert script
             QWEN_DIR=\$(find /workspace/TensorRT-LLM -type d -name 'qwen' | grep -E 'examples.*qwen\$' | head -1)
-            if [ -z \"\$QWEN_DIR\" ]; then
+            if [[ -z \"\$QWEN_DIR\" ]]; then
                 echo 'ERROR: Could not find qwen examples directory'
-                find /workspace/TensorRT-LLM -name 'convert_checkpoint.py' | head -5
                 exit 1
             fi
-            echo \"Using Qwen examples from: \$QWEN_DIR\"
-            cd \$QWEN_DIR
+            echo \"Using: \$QWEN_DIR\"
+            cd \"\$QWEN_DIR\"
 
-            echo '=== Step 1: Converting/Quantizing model ==='
+            echo '=== Converting/Quantizing model ==='
+            case '${QUANTIZATION}' in
+                none)
+                    python3 convert_checkpoint.py \
+                        --model_dir \"\$MODEL_DIR\" \
+                        --output_dir \"\$CHECKPOINT_DIR\" \
+                        --dtype float16
+                    ;;
+                fp8)
+                    python3 convert_checkpoint.py \
+                        --model_dir \"\$MODEL_DIR\" \
+                        --output_dir \"\$CHECKPOINT_DIR\" \
+                        --dtype float16 \
+                        --use_fp8
+                    ;;
+                int8_sq)
+                    python3 convert_checkpoint.py \
+                        --model_dir \"\$MODEL_DIR\" \
+                        --output_dir \"\$CHECKPOINT_DIR\" \
+                        --dtype float16 \
+                        --smoothquant 0.5 \
+                        --per_token \
+                        --per_channel \
+                        --int8_kv_cache
+                    ;;
+                int4_awq|int4)
+                    python3 convert_checkpoint.py \
+                        --model_dir \"\$MODEL_DIR\" \
+                        --output_dir \"\$CHECKPOINT_DIR\" \
+                        --dtype float16 \
+                        --use_weight_only \
+                        --weight_only_precision int4 \
+                        --per_group \
+                        --group_size 128
+                    ;;
+                *)
+                    echo \"Unknown quantization: ${QUANTIZATION}\"
+                    exit 1
+                    ;;
+            esac
 
-            if [ '${QUANTIZATION}' == 'none' ]; then
-                # No quantization - just convert checkpoint (FP16)
-                echo 'Converting without quantization (FP16)...'
-                python3 convert_checkpoint.py \
-                    --model_dir \$MODEL_DIR \
-                    --output_dir \$CHECKPOINT_DIR \
-                    --dtype float16
-
-            elif [ '${QUANTIZATION}' == 'fp8' ]; then
-                # FP8 quantization (best for Hopper/Ada GPUs)
-                echo 'Quantizing to FP8...'
-                python3 convert_checkpoint.py \
-                    --model_dir \$MODEL_DIR \
-                    --output_dir \$CHECKPOINT_DIR \
-                    --dtype float16 \
-                    --use_fp8
-
-            elif [ '${QUANTIZATION}' == 'int8_sq' ]; then
-                # INT8 SmoothQuant (good balance, works on older GPUs)
-                echo 'Quantizing with INT8 SmoothQuant...'
-                python3 convert_checkpoint.py \
-                    --model_dir \$MODEL_DIR \
-                    --output_dir \$CHECKPOINT_DIR \
-                    --dtype float16 \
-                    --smoothquant 0.5 \
-                    --per_token \
-                    --per_channel \
-                    --int8_kv_cache
-
-            elif [ '${QUANTIZATION}' == 'int4_awq' ] || [ '${QUANTIZATION}' == 'int4' ]; then
-                # INT4 weight-only (smallest, good for memory-constrained)
-                echo 'Quantizing with INT4 weight-only...'
-                python3 convert_checkpoint.py \
-                    --model_dir \$MODEL_DIR \
-                    --output_dir \$CHECKPOINT_DIR \
-                    --dtype float16 \
-                    --use_weight_only \
-                    --weight_only_precision int4 \
-                    --per_group \
-                    --group_size 128
-
-            else
-                echo 'Unknown quantization: ${QUANTIZATION}'
-                exit 1
-            fi
-
-            echo '=== Step 2: Building TensorRT engine ==='
+            echo '=== Building TensorRT engine ==='
             trtllm-build \
-                --checkpoint_dir \$CHECKPOINT_DIR \
-                --output_dir \$ENGINE_DIR \
+                --checkpoint_dir \"\$CHECKPOINT_DIR\" \
+                --output_dir \"\$ENGINE_DIR\" \
                 --max_batch_size ${MAX_BATCH_SIZE} \
                 --max_input_len ${MAX_INPUT_LEN} \
                 --max_seq_len ${MAX_SEQ_LEN} \
@@ -406,45 +236,50 @@ build_engine() {
                 --use_fused_mlp enable \
                 --multiple_profiles enable
 
-            echo '=== Build complete! ==='
-            ls -la \$ENGINE_DIR
+            echo '=== Build complete ==='
+            ls -la \"\$ENGINE_DIR\"
         "
 
-    log_info "Engine built at ${ENGINE_DIR}"
+    log_info "Engine built at ${engine_dir}"
 }
 
-# =============================================================================
-# Setup Triton Model Repository
-# =============================================================================
 setup_triton() {
-    log_info "Setting up Triton model repository..."
+    log_step "Setting up Triton model repository..."
 
-    ENGINE_DIR="${WORK_DIR}/engine_${QUANTIZATION}"
-    TRITON_MODEL="${MODEL_REPO}/qwen3_8b"
+    local engine_dir="${WORK_DIR}/engine_${QUANTIZATION}"
 
-    mkdir -p "${TRITON_MODEL}/1"
+    mkdir -p "${MODEL_REPO}/1"
 
-    # Link or copy engine files
-    if [ -d "${ENGINE_DIR}" ]; then
-        ln -sf "${ENGINE_DIR}" "${TRITON_MODEL}/1/engine" 2>/dev/null || \
-            cp -r "${ENGINE_DIR}" "${TRITON_MODEL}/1/engine"
+    # Link engine directory
+    if [[ -d "$engine_dir" ]]; then
+        rm -f "${MODEL_REPO}/1/engine"
+        ln -sf "$engine_dir" "${MODEL_REPO}/1/engine" || \
+            cp -r "$engine_dir" "${MODEL_REPO}/1/engine"
+        log_info "Engine linked"
     fi
 
-    # Copy tokenizer files from HuggingFace model
+    # Copy tokenizer files
     log_info "Copying tokenizer files..."
-    mkdir -p "${TRITON_MODEL}/1/tokenizer"
-    cp "${WORK_DIR}/${MODEL_DIR_NAME}/tokenizer"* "${TRITON_MODEL}/1/tokenizer/" 2>/dev/null || true
-    cp "${WORK_DIR}/${MODEL_DIR_NAME}/vocab"* "${TRITON_MODEL}/1/tokenizer/" 2>/dev/null || true
-    cp "${WORK_DIR}/${MODEL_DIR_NAME}/merges"* "${TRITON_MODEL}/1/tokenizer/" 2>/dev/null || true
-    cp "${WORK_DIR}/${MODEL_DIR_NAME}/special_tokens"* "${TRITON_MODEL}/1/tokenizer/" 2>/dev/null || true
-    cp "${WORK_DIR}/${MODEL_DIR_NAME}/config.json" "${TRITON_MODEL}/1/tokenizer/" 2>/dev/null || true
-    cp "${WORK_DIR}/${MODEL_DIR_NAME}/generation_config.json" "${TRITON_MODEL}/1/tokenizer/" 2>/dev/null || true
+    mkdir -p "${MODEL_REPO}/1/tokenizer"
 
-    # Create config.pbtxt for TensorRT-LLM backend
-    cat > "${TRITON_MODEL}/config.pbtxt" << 'EOF'
+    local src="${WORK_DIR}/${MODEL_DIR_NAME}"
+    cp "${src}/tokenizer"*.json "${MODEL_REPO}/1/tokenizer/" 2>/dev/null || true
+    cp "${src}/vocab"* "${MODEL_REPO}/1/tokenizer/" 2>/dev/null || true
+    cp "${src}/merges"* "${MODEL_REPO}/1/tokenizer/" 2>/dev/null || true
+    cp "${src}/special_tokens"* "${MODEL_REPO}/1/tokenizer/" 2>/dev/null || true
+    cp "${src}/config.json" "${MODEL_REPO}/1/tokenizer/" 2>/dev/null || true
+    cp "${src}/generation_config.json" "${MODEL_REPO}/1/tokenizer/" 2>/dev/null || true
+
+    # Create config.pbtxt
+    # Note: Using ${var} placeholder syntax for optional TRT-LLM parameters
+    # that get auto-detected by the backend
+    cat > "${MODEL_REPO}/config.pbtxt" << EOF
+# Qwen3 8B - TensorRT-LLM Backend
+# Quantization: ${QUANTIZATION}
+
 name: "qwen3_8b"
 backend: "tensorrtllm"
-max_batch_size: 8
+max_batch_size: ${MAX_BATCH_SIZE}
 
 model_transaction_policy {
   decoupled: true
@@ -483,6 +318,24 @@ input [
     data_type: TYPE_BOOL
     dims: [ 1 ]
     optional: true
+  },
+  {
+    name: "temperature"
+    data_type: TYPE_FP32
+    dims: [ 1 ]
+    optional: true
+  },
+  {
+    name: "top_k"
+    data_type: TYPE_INT32
+    dims: [ 1 ]
+    optional: true
+  },
+  {
+    name: "top_p"
+    data_type: TYPE_FP32
+    dims: [ 1 ]
+    optional: true
   }
 ]
 
@@ -514,22 +367,12 @@ parameters {
 
 parameters {
   key: "gpt_model_path"
-  value: { string_value: "${engine_dir}" }
+  value: { string_value: "/models/qwen3_8b/1/engine" }
 }
 
 parameters {
   key: "tokenizer_dir"
   value: { string_value: "/models/qwen3_8b/1/tokenizer" }
-}
-
-parameters {
-  key: "xgrammar_tokenizer_info_path"
-  value: { string_value: "/models/qwen3_8b/1/tokenizer" }
-}
-
-parameters {
-  key: "guided_decoding_backend"
-  value: { string_value: "xgrammar" }
 }
 
 parameters {
@@ -539,55 +382,52 @@ parameters {
 
 parameters {
   key: "kv_cache_free_gpu_mem_fraction"
-  value: { string_value: "${kv_cache_fraction}" }
+  value: { string_value: "${KV_CACHE_FREE_GPU_MEM_FRACTION}" }
 }
 
-parameters {
-  key: "max_tokens_in_paged_kv_cache"
-  value: { string_value: "${max_kv_tokens}" }
-}
+version_policy: { latest: { num_versions: 1 } }
 EOF
 
-    # Replace placeholders with actual values
-    sed -i "s|\${engine_dir}|/models/qwen3_8b/1/engine|g" "${TRITON_MODEL}/config.pbtxt"
-    sed -i "s|\${kv_cache_fraction}|${KV_CACHE_FREE_GPU_MEM_FRACTION}|g" "${TRITON_MODEL}/config.pbtxt"
-    sed -i "s|\${max_kv_tokens}|${MAX_TOKENS_IN_PAGED_KV_CACHE}|g" "${TRITON_MODEL}/config.pbtxt"
-
-    log_info "Triton model configured at ${TRITON_MODEL}"
+    log_info "Created: ${MODEL_REPO}/config.pbtxt"
 }
 
-# =============================================================================
-# Main
-# =============================================================================
-main() {
-    download_model
-    build_engine
-    setup_triton
-
+show_summary() {
     echo ""
     echo "=============================================="
     echo -e "${GREEN}Qwen3 8B Build Complete${NC}"
     echo "=============================================="
     echo ""
     echo "Quantization: ${QUANTIZATION}"
-    echo "Engine: ${WORK_DIR}/engine_${QUANTIZATION}"
-    echo "Triton model: ${MODEL_REPO}/qwen3_8b"
+    echo "Engine:       ${WORK_DIR}/engine_${QUANTIZATION}"
+    echo "Triton model: ${MODEL_REPO}"
     echo ""
-    echo "To test locally:"
-    echo "  trtllm-serve ${WORK_DIR}/engine_${QUANTIZATION} --port 8000"
+    echo "To start Triton:"
+    echo "  docker compose up -d triton"
     echo ""
-    echo "Or start Triton:"
-    echo "  docker-compose up -d triton"
-    echo ""
+    echo "Cleanup options:"
+    echo "  $0 cleanup           # Remove downloads, keep engine"
+    echo "  $0 cleanup --all     # Remove everything"
+    echo "  $0 cleanup --image   # Remove Docker image (~20GB)"
+}
+
+# =============================================================================
+# Main
+# =============================================================================
+main() {
     echo "=============================================="
-    echo "Cleanup Options"
+    echo "Building Qwen3 8B TensorRT-LLM Engine"
     echo "=============================================="
+    echo "Model:        ${MODEL_NAME}"
+    echo "Quantization: ${QUANTIZATION}"
+    echo "Container:    ${TRTLLM_IMAGE}"
     echo ""
-    echo "The TensorRT-LLM dev container (~20GB) can be removed after building:"
-    echo "  $0 cleanup          # Just remove any stopped containers"
-    echo "  $0 cleanup --image  # Remove the Docker image to free ~20GB"
-    echo "  $0 cleanup --all    # Remove image + all downloaded models/checkpoints"
-    echo ""
+
+    require_gpu
+
+    download_model
+    build_engine
+    setup_triton
+    show_summary
 }
 
 main
