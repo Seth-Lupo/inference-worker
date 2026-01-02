@@ -24,8 +24,9 @@ log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
 # Container configuration
 # IMPORTANT: Use same TRT-LLM version as Triton serving container!
-# Triton 24.12 has TRT-LLM 0.16.0, so use matching build container
-TRTLLM_IMAGE="nvcr.io/nvidia/tritonserver:24.12-trtllm-python-py3"
+# Triton 24.12 has TRT-LLM 0.16.0, so use matching DEV container for building
+# (tritonserver container is serving-only, no build tools)
+TRTLLM_IMAGE="nvcr.io/nvidia/tensorrt-llm/release:0.16.0"
 TRTLLM_CONTAINER_NAME="trtllm-builder-qwen3"
 
 # Load environment
