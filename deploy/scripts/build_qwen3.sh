@@ -501,6 +501,11 @@ parameters {
 }
 
 parameters {
+  key: "xgrammar_tokenizer_info_path"
+  value: { string_value: "/models/qwen3_8b/1/tokenizer" }
+}
+
+parameters {
   key: "batch_scheduler_policy"
   value: { string_value: "max_utilization" }
 }
