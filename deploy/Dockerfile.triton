@@ -2,6 +2,14 @@
 # Using Triton 25.12 with TRT-LLM 1.0.0+ (Qwen3 TensorRT engine support)
 FROM nvcr.io/nvidia/tritonserver:25.12-trtllm-python-py3
 
+# Install system dependencies for audio processing
+# espeak-ng: required by phonemizer for text-to-phoneme conversion
+# libsndfile1: required by soundfile for audio I/O
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        espeak-ng \
+        libsndfile1 \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install grpcio as pre-built binary (skip slow source compilation)
 RUN pip install --no-cache-dir --only-binary :all: grpcio grpcio-tools
 
@@ -9,22 +17,40 @@ RUN pip install --no-cache-dir --only-binary :all: grpcio grpcio-tools
 RUN pip install --no-cache-dir \
         torch torchaudio --index-url https://download.pytorch.org/whl/cu130
 
-# Install other Python packages for Parakeet ASR and CosyVoice TTS
+# Install Python packages for Parakeet ASR and CosyVoice TTS
+# Based on CosyVoice requirements.txt + Matcha-TTS requirements.txt
 RUN pip install --no-cache-dir \
+        # ASR (Parakeet)
         sherpa-onnx \
         onnxruntime-gpu \
+        # Core ML
         numpy \
+        scipy \
         transformers \
         sentencepiece \
+        einops \
+        # CosyVoice/Matcha-TTS config
+        hydra-core \
+        omegaconf \
         hyperpyyaml \
-        s3tokenizer \
+        pydantic \
+        # CosyVoice/Matcha-TTS audio processing
+        librosa \
+        soundfile \
+        pyworld \
+        phonemizer \
+        inflect \
+        Unidecode \
+        # CosyVoice/Matcha-TTS models
+        lightning \
         conformer \
         diffusers \
+        x-transformers \
+        # Utilities
+        s3tokenizer \
         onnx \
         openai-whisper \
-        wget \
-        hydra-core \
-        omegaconf
+        wget
 
 # Install CosyVoice and Matcha-TTS from source (not pip packages, just add to PYTHONPATH)
 # Use --only-binary for grpcio to prevent slow source builds

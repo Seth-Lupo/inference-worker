@@ -7,12 +7,45 @@
 # =============================================================================
 set -e
 
+# =============================================================================
+# CONFIGURATION - Edit these values as needed
+# =============================================================================
+
+# Model to download from HuggingFace
+# Note: Qwen3-8B is already instruct-capable (no separate -Instruct variant)
+# Qwen3-8B-Base is the pretrained-only version
+MODEL_NAME="${MODEL_NAME:-Qwen/Qwen3-8B}"
+MODEL_DIR_NAME="${MODEL_DIR_NAME:-Qwen3-8B}"
+
+# Quantization method (can override with first argument)
+# Options: fp8 (Hopper/Ada), int8_sq (good balance), int4 (smallest), none (FP16)
+QUANTIZATION="${QUANTIZATION:-int4}"
+
+# Triton container for building (ensures engine compatibility)
+# IMPORTANT: Must match the container used for serving!
+TRTLLM_IMAGE="${TRTLLM_IMAGE:-nvcr.io/nvidia/tritonserver:25.12-trtllm-python-py3}"
+TRTLLM_CONTAINER_NAME="trtllm-builder-qwen3"
+
+# TensorRT-LLM build parameters
+MAX_BATCH_SIZE="${MAX_BATCH_SIZE:-8}"
+MAX_INPUT_LEN="${MAX_INPUT_LEN:-4096}"
+MAX_SEQ_LEN="${MAX_SEQ_LEN:-8192}"
+
+# KV cache configuration
+KV_CACHE_FREE_GPU_MEM_FRACTION="${KV_CACHE_FREE_GPU_MEM_FRACTION:-0.8}"
+MAX_TOKENS_IN_PAGED_KV_CACHE="${MAX_TOKENS_IN_PAGED_KV_CACHE:-8192}"
+
+# =============================================================================
+# PATHS - Derived from script location
+# =============================================================================
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEPLOY_DIR="$(dirname "$SCRIPT_DIR")"
 WORK_DIR="${DEPLOY_DIR}/qwen3_build"
 MODEL_REPO="${DEPLOY_DIR}/model_repository"
 
-# Colors
+# =============================================================================
+# Logging
+# =============================================================================
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
@@ -22,24 +55,13 @@ log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
-# Container configuration
-# IMPORTANT: Use Triton container for building to guarantee version match!
-# Qwen3 TensorRT engine requires TRT-LLM >= 1.0.0
-# Triton 25.12-trtllm-python-py3 is the latest release
-TRTLLM_IMAGE="nvcr.io/nvidia/tritonserver:25.12-trtllm-python-py3"
-TRTLLM_CONTAINER_NAME="trtllm-builder-qwen3"
-
-# Load environment
+# Load environment variables from .env file
 if [ -f "${DEPLOY_DIR}/.env" ]; then
     source "${DEPLOY_DIR}/.env"
 fi
 
-# Configuration
-# Note: Qwen3-8B is already instruct-capable (no separate -Instruct variant)
-# Qwen3-8B-Base is the pretrained-only version
-MODEL_NAME="Qwen/Qwen3-8B"
-MODEL_DIR_NAME="Qwen3-8B"
-QUANTIZATION="${1:-int8_sq}"  # Options: fp8, int8_sq, int4 (or int4_awq), none
+# Override QUANTIZATION from command line if provided
+[ -n "$1" ] && [[ "$1" != "cleanup" ]] && [[ "$1" != "clean" ]] && QUANTIZATION="$1"
 
 # =============================================================================
 # Handle cleanup command
@@ -376,9 +398,9 @@ build_engine() {
             trtllm-build \
                 --checkpoint_dir \$CHECKPOINT_DIR \
                 --output_dir \$ENGINE_DIR \
-                --max_batch_size 8 \
-                --max_input_len 4096 \
-                --max_seq_len 8192 \
+                --max_batch_size ${MAX_BATCH_SIZE} \
+                --max_input_len ${MAX_INPUT_LEN} \
+                --max_seq_len ${MAX_SEQ_LEN} \
                 --gemm_plugin auto \
                 --paged_kv_cache enable \
                 --use_fused_mlp enable \
@@ -517,17 +539,19 @@ parameters {
 
 parameters {
   key: "kv_cache_free_gpu_mem_fraction"
-  value: { string_value: "0.8" }
+  value: { string_value: "${kv_cache_fraction}" }
 }
 
 parameters {
   key: "max_tokens_in_paged_kv_cache"
-  value: { string_value: "8192" }
+  value: { string_value: "${max_kv_tokens}" }
 }
 EOF
 
-    # Replace placeholder with actual path
+    # Replace placeholders with actual values
     sed -i "s|\${engine_dir}|/models/qwen3_8b/1/engine|g" "${TRITON_MODEL}/config.pbtxt"
+    sed -i "s|\${kv_cache_fraction}|${KV_CACHE_FREE_GPU_MEM_FRACTION}|g" "${TRITON_MODEL}/config.pbtxt"
+    sed -i "s|\${max_kv_tokens}|${MAX_TOKENS_IN_PAGED_KV_CACHE}|g" "${TRITON_MODEL}/config.pbtxt"
 
     log_info "Triton model configured at ${TRITON_MODEL}"
 }

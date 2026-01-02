@@ -90,11 +90,39 @@
 # =============================================================================
 set -e
 
+# =============================================================================
+# CONFIGURATION - Edit these values as needed
+# =============================================================================
+
+# Model sources
+COSYVOICE_REPO="${COSYVOICE_REPO:-https://github.com/FunAudioLLM/CosyVoice.git}"
+HF_MODEL="${HF_MODEL:-yuekai/cosyvoice2_llm}"
+MODELSCOPE_MODEL="${MODELSCOPE_MODEL:-iic/CosyVoice2-0.5B}"
+
+# TensorRT data type for engine build
+TRT_DTYPE="${TRT_DTYPE:-bfloat16}"
+
+# Triton container for building (ensures engine compatibility)
+# IMPORTANT: Must match the container used for serving!
+TRTLLM_IMAGE="${TRTLLM_IMAGE:-nvcr.io/nvidia/tritonserver:25.12-trtllm-python-py3}"
+TRTLLM_CONTAINER_NAME="trtllm-builder-cosyvoice"
+
+# Triton model configuration
+TRITON_MAX_BATCH_SIZE="${TRITON_MAX_BATCH_SIZE:-16}"
+BLS_INSTANCE_NUM="${BLS_INSTANCE_NUM:-4}"
+MAX_QUEUE_DELAY_MICROSECONDS="${MAX_QUEUE_DELAY_MICROSECONDS:-0}"
+DECOUPLED_MODE="${DECOUPLED_MODE:-True}"  # True for streaming, False for offline
+
+# =============================================================================
+# PATHS - Derived from script location
+# =============================================================================
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEPLOY_DIR="$(dirname "$SCRIPT_DIR")"
 WORK_DIR="${DEPLOY_DIR}/cosyvoice_build"
 
-# Colors
+# =============================================================================
+# Logging
+# =============================================================================
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
@@ -104,23 +132,10 @@ log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
-# Container configuration
-# IMPORTANT: Use Triton container for building to guarantee version match!
-# Using same container as build ensures engine compatibility
-# Triton 25.12-trtllm-python-py3 is the latest release
-TRTLLM_IMAGE="nvcr.io/nvidia/tritonserver:25.12-trtllm-python-py3"
-TRTLLM_CONTAINER_NAME="trtllm-builder-cosyvoice"
-
-# Load environment
+# Load environment variables from .env file
 if [ -f "${DEPLOY_DIR}/.env" ]; then
     source "${DEPLOY_DIR}/.env"
 fi
-
-# Configuration
-COSYVOICE_REPO="https://github.com/FunAudioLLM/CosyVoice.git"
-HF_MODEL="yuekai/cosyvoice2_llm"
-MODELSCOPE_MODEL="iic/CosyVoice2-0.5B"
-TRT_DTYPE="bfloat16"
 
 # =============================================================================
 # Handle cleanup command
@@ -438,12 +453,8 @@ if [[ $START_STAGE -le 2 ]] && [[ $STOP_STAGE -ge 2 ]]; then
     ENGINE_PATH="/models/cosyvoice2_full/tensorrt_llm/1/engine"
     MODEL_DIR="/models/cosyvoice2_full/assets"
     LLM_TOKENIZER_DIR="/models/cosyvoice2_full/assets/cosyvoice2_llm"
-    MAX_QUEUE_DELAY_MICROSECONDS=0
-    BLS_INSTANCE_NUM=4
-    TRITON_MAX_BATCH_SIZE=16
-    DECOUPLED_MODE=True  # True for streaming, False for offline
 
-    # Fill templates
+    # Fill templates (uses variables from CONFIGURATION section at top)
     log_info "Filling config templates..."
     cd "${WORK_DIR}/CosyVoice/runtime/triton_trtllm"
 

@@ -10,11 +10,33 @@
 # =============================================================================
 set -e
 
+# =============================================================================
+# CONFIGURATION - Edit these values as needed
+# =============================================================================
+
+# Use INT8 quantized version (smaller, slightly less accurate)
+USE_INT8="${USE_INT8:-false}"
+
+# Sherpa-ONNX release version
+SHERPA_VERSION="v1.10.30"
+
+# Model name in Triton
+MODEL_NAME="parakeet_tdt"
+
+# HuggingFace repository for ONNX models
+HF_REPO="onnx-community/parakeet-tdt-0.6b-v2-ONNX"
+
+# =============================================================================
+# PATHS - Derived from script location
+# =============================================================================
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEPLOY_DIR="$(dirname "$SCRIPT_DIR")"
 MODEL_REPO="${DEPLOY_DIR}/model_repository"
 WORK_DIR="${DEPLOY_DIR}/parakeet_build"
 
+# =============================================================================
+# Logging
+# =============================================================================
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
@@ -24,8 +46,8 @@ log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
-# Options
-USE_INT8="${1:-false}"  # Use INT8 quantized version
+# Override USE_INT8 from command line if provided
+[ -n "$1" ] && USE_INT8="$1"
 
 echo "=============================================="
 echo "Setting up Parakeet TDT 0.6B V2"
@@ -106,14 +128,12 @@ download_from_sherpa() {
     if [ "$USE_INT8" == "true" ]; then
         # INT8 quantized version (smaller, slightly less accurate)
         ARCHIVE="sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8.tar.bz2"
-        VERSION="v1.10.30"
     else
         # FP16 version
         ARCHIVE="sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-fp16.tar.bz2"
-        VERSION="v1.10.30"
     fi
 
-    DOWNLOAD_URL="${SHERPA_BASE}/${VERSION}/${ARCHIVE}"
+    DOWNLOAD_URL="${SHERPA_BASE}/${SHERPA_VERSION}/${ARCHIVE}"
 
     # Always re-download to ensure we have the right file
     rm -f "${WORK_DIR}/${ARCHIVE}"

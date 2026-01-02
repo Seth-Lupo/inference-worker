@@ -38,7 +38,7 @@ services:
       # Note: silero_vad runs locally in worker, not in Triton
       - ./model_repository:/models:ro
       # Mount built Qwen3 TensorRT-LLM engine
-      - ./qwen3_build/engine_int4_awq:/models/qwen3_8b/1/engine:ro
+      - ./qwen3_build/engine_int4:/models/qwen3_8b/1/engine:ro
       # Mount CosyVoice2 full model repo (5 models with Python backends)
       # Built by: ./scripts/build_cosyvoice.sh -1 2
       # Note: rw needed for TensorRT engine caching
