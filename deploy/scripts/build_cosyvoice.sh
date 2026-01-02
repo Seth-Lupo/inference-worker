@@ -142,11 +142,20 @@ cd "${WORK_DIR}"
 if [[ $START_STAGE -le -1 ]] && [[ $STOP_STAGE -ge -1 ]]; then
     log_info "Stage -1: Cloning CosyVoice repository..."
 
-    if [ ! -d "CosyVoice" ]; then
-        git clone --recursive "${COSYVOICE_REPO}"
+    # Check if repo exists AND has content (not empty dir)
+    if [ ! -d "CosyVoice/.git" ]; then
+        # Remove empty/broken directory if it exists
+        rm -rf CosyVoice 2>/dev/null || true
+
+        log_info "Cloning ${COSYVOICE_REPO}..."
+        git clone --recursive "${COSYVOICE_REPO}" || {
+            log_error "Failed to clone CosyVoice repository"
+            exit 1
+        }
         cd CosyVoice
         git submodule update --init --recursive
         cd ..
+        log_info "CosyVoice cloned successfully"
     else
         log_info "CosyVoice repo already exists"
     fi
