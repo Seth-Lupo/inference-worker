@@ -134,13 +134,26 @@ else
 fi
 
 # -----------------------------------------------------------------------------
-# 8. Pull Container Images
+# 8. Install Git LFS (required for downloading models from HuggingFace)
 # -----------------------------------------------------------------------------
-log_info "Pulling Triton Inference Server image..."
-docker pull nvcr.io/nvidia/tritonserver:24.12-trtllm-python-py3
+log_info "Installing git-lfs..."
+if ! command -v git-lfs &> /dev/null; then
+    sudo yum install -y git-lfs 2>/dev/null || sudo apt-get install -y git-lfs
+    git lfs install
+    log_info "git-lfs installed"
+else
+    log_info "git-lfs already installed"
+fi
 
 # -----------------------------------------------------------------------------
-# 9. Create Environment File
+# 9. Pull Container Images
+# -----------------------------------------------------------------------------
+log_info "Pulling Triton Inference Server image..."
+# Triton 25.12 with TRT-LLM 1.0+ (required for Qwen3 support)
+docker pull nvcr.io/nvidia/tritonserver:25.12-trtllm-python-py3
+
+# -----------------------------------------------------------------------------
+# 10. Create Environment File
 # -----------------------------------------------------------------------------
 log_info "Creating environment file..."
 cat > ${DEPLOY_DIR}/deploy/.env << 'EOF'
@@ -164,7 +177,7 @@ log_info "Environment file created at ${DEPLOY_DIR}/deploy/.env"
 log_warn "Edit the .env file to add your HuggingFace token"
 
 # -----------------------------------------------------------------------------
-# 10. Set Permissions
+# 11. Set Permissions
 # -----------------------------------------------------------------------------
 log_info "Setting permissions..."
 sudo chown -R $(whoami):$(whoami) ${DEPLOY_DIR}
@@ -179,10 +192,13 @@ echo -e "${GREEN}EC2 Setup Complete!${NC}"
 echo "=============================================="
 echo ""
 echo "Next steps:"
-echo "  1. Edit ${DEPLOY_DIR}/deploy/.env with your tokens"
-echo "  2. Copy your code to ${DEPLOY_DIR}"
-echo "  3. Download models: ./scripts/download_models.sh"
-echo "  4. Build TensorRT engines: ./scripts/build_engines.sh"
-echo "  5. Start services: docker-compose up -d"
+echo "  1. Edit ${DEPLOY_DIR}/deploy/.env with your HF_TOKEN"
+echo "  2. Clone/copy your code to ${DEPLOY_DIR}"
+echo "  3. Build models:"
+echo "     ./scripts/build_qwen3.sh      # Qwen3 8B LLM (~30 min)"
+echo "     ./scripts/build_cosyvoice.sh  # CosyVoice TTS (~15 min)"
+echo "     ./scripts/build_parakeet.sh   # Parakeet ASR (~1 min)"
+echo "  4. Build custom Triton image: docker compose build triton"
+echo "  5. Start services: docker compose up -d"
 echo ""
-echo "Note: You may need to log out and back in for Docker group changes."
+echo "Note: Log out and back in for Docker group changes to take effect."
