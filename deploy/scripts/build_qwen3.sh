@@ -298,15 +298,16 @@ build_engine() {
             ENGINE_DIR=/workspace/build/engine_${QUANTIZATION}
 
             echo '=== TensorRT-LLM Version Check ==='
-            TRTLLM_VERSION=\$(python3 -c 'import tensorrt_llm; print(tensorrt_llm.__version__)')
-            echo \"TRT-LLM version: \$TRTLLM_VERSION\"
+            # Suppress TRT-LLM banner, extract only version number
+            TRTLLM_VERSION=\$(python3 -c 'import tensorrt_llm; print(tensorrt_llm.__version__)' 2>/dev/null | tail -1)
+            echo \"TRT-LLM version: \${TRTLLM_VERSION}\"
 
-            echo '=== Cloning TRT-LLM examples (v\$TRTLLM_VERSION) ==='
+            echo \"=== Cloning TRT-LLM examples (v\${TRTLLM_VERSION}) ===\"
             # Triton container has TRT-LLM runtime but not the conversion examples
             # Clone the matching version to get convert_checkpoint.py
             if [ ! -d '/workspace/TensorRT-LLM' ]; then
-                git clone --depth 1 --branch v\$TRTLLM_VERSION https://github.com/NVIDIA/TensorRT-LLM.git /workspace/TensorRT-LLM || \
-                git clone --depth 1 --branch release/\$TRTLLM_VERSION https://github.com/NVIDIA/TensorRT-LLM.git /workspace/TensorRT-LLM || \
+                git clone --depth 1 --branch \"v\${TRTLLM_VERSION}\" https://github.com/NVIDIA/TensorRT-LLM.git /workspace/TensorRT-LLM || \
+                git clone --depth 1 --branch \"release/\${TRTLLM_VERSION}\" https://github.com/NVIDIA/TensorRT-LLM.git /workspace/TensorRT-LLM || \
                 git clone --depth 1 https://github.com/NVIDIA/TensorRT-LLM.git /workspace/TensorRT-LLM
             fi
 
