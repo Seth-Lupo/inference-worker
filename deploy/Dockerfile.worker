@@ -1,0 +1,44 @@
+# Voice Agent Inference Worker
+# Python WebSocket server that connects to Triton for inference
+
+FROM python:3.11-slim
+
+LABEL maintainer="Voice Agent Team"
+LABEL description="Real-time voice agent inference worker"
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set working directory
+WORKDIR /app
+
+# Copy requirements first for better caching
+COPY requirements.txt .
+
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Install Triton client
+RUN pip install --no-cache-dir \
+    tritonclient[all] \
+    grpcio \
+    protobuf
+
+# Copy source code
+COPY src/ ./src/
+COPY run.py .
+
+# Create logs directory
+RUN mkdir -p /app/logs
+
+# Expose WebSocket port
+EXPOSE 80
+
+# Health check
+HEALTHCHECK --interval=10s --timeout=5s --start-period=10s --retries=3 \
+    CMD python -c "import socket; s=socket.socket(); s.connect(('localhost', 80)); s.close()" || exit 1
+
+# Run the server
+CMD ["python", "run.py", "--host", "0.0.0.0", "--port", "80"]

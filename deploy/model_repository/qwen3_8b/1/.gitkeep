@@ -1,0 +1,10 @@
+# Place TensorRT-LLM engine files here in ./engine/ subdirectory
+#
+# Build engines using the model conversion scripts:
+#   ./scripts/build_qwen3_engine.sh
+#
+# Required files after conversion:
+#   engine/
+#   ├── config.json
+#   ├── rank0.engine
+#   └── ... (other engine files)

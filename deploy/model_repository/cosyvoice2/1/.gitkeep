@@ -1,0 +1,13 @@
+# CosyVoice 2 model files
+#
+# Download and place the following:
+#   pretrained_models/
+#   └── CosyVoice2-0.5B/
+#       ├── llm/
+#       ├── flow/
+#       ├── hift/
+#       └── ...
+#
+# Also place model.py (Python backend script) in this directory
+#
+# Download from: https://huggingface.co/FunAudioLLM/CosyVoice2-0.5B

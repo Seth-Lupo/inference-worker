@@ -1,0 +1,138 @@
+version: "3.8"
+
+services:
+  # =============================================================================
+  # Triton Inference Server with TensorRT-LLM Backend
+  # =============================================================================
+  triton:
+    image: nvcr.io/nvidia/tritonserver:24.12-trtllm-python-py3
+    container_name: voice-agent-triton
+    restart: unless-stopped
+
+    # GPU access
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+    # Shared memory for TensorRT-LLM
+    shm_size: "4g"
+    ulimits:
+      memlock: -1
+      stack: 67108864
+
+    ports:
+      - "8000:8000"   # HTTP
+      - "8001:8001"   # gRPC
+      - "8002:8002"   # Metrics
+
+    volumes:
+      # Model repository
+      - ./model_repository:/models:ro
+      # Engine cache (persist built TensorRT engines)
+      - ./engine_cache:/engine_cache
+      # Logs
+      - ./logs/triton:/var/log/triton
+
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+      - TRT_LOGGER_LEVEL=WARNING
+
+    command: >
+      tritonserver
+      --model-repository=/models
+      --log-verbose=1
+      --log-info=true
+      --log-warning=true
+      --log-error=true
+      --strict-model-config=false
+      --http-port=8000
+      --grpc-port=8001
+      --metrics-port=8002
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/v2/health/ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+
+  # =============================================================================
+  # Voice Agent Inference Worker (Python WebSocket Server)
+  # =============================================================================
+  worker:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.worker
+    container_name: voice-agent-worker
+    restart: unless-stopped
+
+    ports:
+      - "80:80"
+
+    volumes:
+      # Sync source code for development
+      - ../src:/app/src:ro
+      # Logs
+      - ./logs/worker:/app/logs
+
+    environment:
+      - TRITON_URL=triton:8001
+      - TRITON_HTTP_URL=http://triton:8000
+      - LOG_LEVEL=INFO
+      - PYTHONUNBUFFERED=1
+
+    depends_on:
+      triton:
+        condition: service_healthy
+
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; s=socket.socket(); s.connect(('localhost', 80)); s.close()"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # =============================================================================
+  # Model Builder (One-off container for building TensorRT engines)
+  # =============================================================================
+  model-builder:
+    image: nvcr.io/nvidia/tritonserver:24.12-trtllm-python-py3
+    container_name: voice-agent-model-builder
+    profiles: ["build"]  # Only runs with: docker compose --profile build up model-builder
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+    shm_size: "8g"
+    ulimits:
+      memlock: -1
+      stack: 67108864
+
+    volumes:
+      - ./model_repository:/models
+      - ./engine_cache:/engine_cache
+      - ./scripts:/scripts:ro
+      - ./model_sources:/model_sources
+
+    working_dir: /scripts
+
+    environment:
+      - HF_TOKEN=${HF_TOKEN}
+      - CUDA_VISIBLE_DEVICES=0
+
+    command: ["bash", "-c", "echo 'Model builder ready. Run scripts manually or use: docker exec -it voice-agent-model-builder bash'"]
+
+    stdin_open: true
+    tty: true
+
+networks:
+  default:
+    name: voice-agent-network

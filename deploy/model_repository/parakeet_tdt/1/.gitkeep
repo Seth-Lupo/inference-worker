@@ -1,0 +1,8 @@
+# Place Parakeet TDT ONNX model files here:
+# - encoder.onnx (or encoder.int8.onnx for quantized)
+# - decoder.onnx
+# - joiner.onnx
+# - tokens.txt
+#
+# Download from: https://github.com/k2-fsa/sherpa-onnx/releases
+# Or convert from NeMo using the model conversion scripts

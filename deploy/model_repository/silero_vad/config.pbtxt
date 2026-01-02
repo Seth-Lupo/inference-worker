@@ -1,0 +1,76 @@
+# Silero VAD - Voice Activity Detection
+# ONNX model for detecting speech in audio streams
+#
+# Input: 16kHz mono audio (512 samples = 32ms)
+# Output: Speech probability (0-1)
+
+name: "silero_vad"
+backend: "onnxruntime"
+max_batch_size: 64
+
+input [
+  {
+    name: "input"
+    data_type: TYPE_FP32
+    dims: [ -1 ]  # Variable length audio samples
+  },
+  {
+    name: "sr"
+    data_type: TYPE_INT64
+    dims: [ 1 ]  # Sample rate (16000)
+  },
+  {
+    name: "h"
+    data_type: TYPE_FP32
+    dims: [ 2, 1, 64 ]  # Hidden state
+  },
+  {
+    name: "c"
+    data_type: TYPE_FP32
+    dims: [ 2, 1, 64 ]  # Cell state
+  }
+]
+
+output [
+  {
+    name: "output"
+    data_type: TYPE_FP32
+    dims: [ 1 ]  # Speech probability
+  },
+  {
+    name: "hn"
+    data_type: TYPE_FP32
+    dims: [ 2, 1, 64 ]  # New hidden state
+  },
+  {
+    name: "cn"
+    data_type: TYPE_FP32
+    dims: [ 2, 1, 64 ]  # New cell state
+  }
+]
+
+# Run on CPU - VAD is lightweight and doesn't need GPU
+instance_group [
+  {
+    count: 2
+    kind: KIND_CPU
+  }
+]
+
+# Dynamic batching for concurrent requests
+dynamic_batching {
+  preferred_batch_size: [ 1, 8, 16, 32 ]
+  max_queue_delay_microseconds: 5000
+}
+
+# Optimization settings
+optimization {
+  execution_accelerators {
+    cpu_execution_accelerator : [
+      { name : "openvino" }
+    ]
+  }
+}
+
+# Version policy
+version_policy: { latest: { num_versions: 1 } }

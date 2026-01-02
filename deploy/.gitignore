@@ -1,0 +1,18 @@
+# Environment files with secrets
+.env
+
+# Model files (too large for git)
+model_sources/
+engine_cache/
+model_repository/*/1/*.onnx
+model_repository/*/1/*.engine
+model_repository/*/1/*.plan
+model_repository/*/1/engine/
+model_repository/*/1/pretrained_models/
+
+# Logs
+logs/
+
+# Python
+__pycache__/
+*.pyc
