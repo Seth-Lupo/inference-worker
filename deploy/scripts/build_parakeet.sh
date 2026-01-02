@@ -46,6 +46,15 @@ log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
+# Check if file is real (not LFS pointer, not empty, not HTML error)
+check_file_real() {
+    local file="$1"
+    local min_size="${2:-1000000}"  # Default 1MB minimum
+    [ ! -f "$file" ] && return 1
+    local size=$(stat -c%s "$file" 2>/dev/null || stat -f%z "$file" 2>/dev/null || echo "0")
+    [ "$size" -gt "$min_size" ]
+}
+
 # Override USE_INT8 from command line if provided
 [ -n "$1" ] && USE_INT8="$1"
 
@@ -94,11 +103,25 @@ download_from_huggingface() {
     done
 
     if [ $DOWNLOADED -gt 0 ]; then
-        # Copy to model repo
-        cp "${WORK_DIR}/parakeet_onnx"/*.onnx "${PARAKEET_DIR}/1/" 2>/dev/null || true
-        cp "${WORK_DIR}/parakeet_onnx"/*.txt "${PARAKEET_DIR}/1/" 2>/dev/null || true
-        cp "${WORK_DIR}/parakeet_onnx"/*.json "${PARAKEET_DIR}/1/" 2>/dev/null || true
-        return 0
+        # Validate ONNX files are real (not HTML error pages)
+        VALID_ONNX=false
+        for f in "${WORK_DIR}/parakeet_onnx/"*.onnx; do
+            if check_file_real "$f"; then
+                VALID_ONNX=true
+                break
+            fi
+        done
+
+        if [ "$VALID_ONNX" = true ]; then
+            # Copy to model repo
+            cp "${WORK_DIR}/parakeet_onnx"/*.onnx "${PARAKEET_DIR}/1/" 2>/dev/null || true
+            cp "${WORK_DIR}/parakeet_onnx"/*.txt "${PARAKEET_DIR}/1/" 2>/dev/null || true
+            cp "${WORK_DIR}/parakeet_onnx"/*.json "${PARAKEET_DIR}/1/" 2>/dev/null || true
+            log_info "HuggingFace download successful"
+            return 0
+        else
+            log_warn "HuggingFace download got invalid files (possibly requires auth)"
+        fi
     fi
 
     log_warn "Direct download failed, trying git clone..."
@@ -171,19 +194,50 @@ download_from_sherpa() {
 
     # Find and copy model files
     EXTRACTED_DIR=$(find . -maxdepth 1 -type d -name "*parakeet*" | head -1)
-    if [ -n "$EXTRACTED_DIR" ]; then
-        cp "${EXTRACTED_DIR}"/*.onnx "${PARAKEET_DIR}/1/" 2>/dev/null || true
-        cp "${EXTRACTED_DIR}"/*.txt "${PARAKEET_DIR}/1/" 2>/dev/null || true
-
-        # Rename INT8 files to standard names (sherpa-onnx uses .int8.onnx suffix)
-        cd "${PARAKEET_DIR}/1/"
-        for f in *.int8.onnx; do
-            [ -f "$f" ] && mv "$f" "${f%.int8.onnx}.onnx"
-        done
-        cd "${WORK_DIR}"
+    if [ -z "$EXTRACTED_DIR" ]; then
+        log_error "Could not find extracted parakeet directory"
+        return 1
     fi
 
-    return 0
+    log_info "Found extracted directory: ${EXTRACTED_DIR}"
+    log_info "Copying files to model repository..."
+
+    # Copy ONNX files
+    cp -v "${EXTRACTED_DIR}"/*.onnx "${PARAKEET_DIR}/1/" || {
+        log_error "Failed to copy ONNX files"
+        return 1
+    }
+
+    # Copy tokens.txt
+    cp -v "${EXTRACTED_DIR}"/tokens.txt "${PARAKEET_DIR}/1/" || {
+        log_error "Failed to copy tokens.txt"
+        return 1
+    }
+
+    # Rename INT8 files to standard names (sherpa-onnx uses .int8.onnx suffix)
+    cd "${PARAKEET_DIR}/1/"
+    for f in *.int8.onnx; do
+        if [ -f "$f" ]; then
+            newname="${f%.int8.onnx}.onnx"
+            log_info "Renaming: $f -> $newname"
+            mv "$f" "$newname"
+        fi
+    done
+
+    # Verify we have the required files
+    if [ -f "${PARAKEET_DIR}/1/encoder.onnx" ] && \
+       [ -f "${PARAKEET_DIR}/1/decoder.onnx" ] && \
+       [ -f "${PARAKEET_DIR}/1/joiner.onnx" ] && \
+       [ -f "${PARAKEET_DIR}/1/tokens.txt" ]; then
+        log_info "Sherpa-ONNX download and setup successful"
+        cd "${WORK_DIR}"
+        return 0
+    else
+        log_error "Missing required files after extraction"
+        ls -la "${PARAKEET_DIR}/1/"
+        cd "${WORK_DIR}"
+        return 1
+    fi
 }
 
 # =============================================================================
@@ -217,9 +271,13 @@ PYTHON
 # =============================================================================
 # Try download methods in order
 # =============================================================================
-if [ -f "${PARAKEET_DIR}/1/encoder.onnx" ] || [ -f "${PARAKEET_DIR}/1/model.onnx" ]; then
-    log_info "Parakeet ONNX model already exists"
+# Check for REAL files (not LFS pointers or empty files)
+if check_file_real "${PARAKEET_DIR}/1/encoder.onnx" || check_file_real "${PARAKEET_DIR}/1/model.onnx"; then
+    log_info "Parakeet ONNX model already exists and is valid"
 else
+    # Clean up any invalid/partial files
+    rm -f "${PARAKEET_DIR}/1/"*.onnx 2>/dev/null || true
+
     download_from_huggingface || download_from_sherpa || {
         log_error "Could not download Parakeet model"
         log_info "Manual download options:"
@@ -230,10 +288,16 @@ else
 fi
 
 # =============================================================================
+# Verify model files exist before creating config
+# =============================================================================
+log_info "Verifying model files..."
+ls -la "${PARAKEET_DIR}/1/"
+
+# =============================================================================
 # Create Triton config
 # =============================================================================
-# Determine which ONNX files we have
-if [ -f "${PARAKEET_DIR}/1/encoder.onnx" ]; then
+# Determine which ONNX files we have (check with size validation)
+if check_file_real "${PARAKEET_DIR}/1/encoder.onnx"; then
     # Sherpa-ONNX style (separate encoder/decoder/joiner)
     log_info "Detected sherpa-onnx model format (encoder/decoder/joiner)"
 
@@ -331,57 +395,17 @@ class TritonPythonModel:
         pass
 PYTHON
 
-else
-    # Single ONNX file format
+elif check_file_real "${PARAKEET_DIR}/1/model.onnx"; then
+    # Single ONNX file format (from HuggingFace)
     log_info "Detected single ONNX model format"
-
-    cat > "${PARAKEET_DIR}/config.pbtxt" << 'EOF'
-# Parakeet TDT 0.6B V2 - Automatic Speech Recognition
-# Single ONNX model format
-
-name: "parakeet_tdt"
-backend: "onnxruntime"
-max_batch_size: 8
-
-input [
-  {
-    name: "audio_signal"
-    data_type: TYPE_FP32
-    dims: [ -1 ]
-  },
-  {
-    name: "length"
-    data_type: TYPE_INT64
-    dims: [ 1 ]
-  }
-]
-
-output [
-  {
-    name: "tokens"
-    data_type: TYPE_INT64
-    dims: [ -1 ]
-  }
-]
-
-instance_group [
-  {
-    count: 1
-    kind: KIND_GPU
-    gpus: [ 0 ]
-  }
-]
-
-optimization {
-  execution_accelerators {
-    gpu_execution_accelerator : [
-      { name : "tensorrt" }
-    ]
-  }
-}
-
-version_policy: { latest: { num_versions: 1 } }
-EOF
+    log_error "Single ONNX format requires onnxruntime backend which is NOT available in TRT-LLM Triton image"
+    log_error "Please use sherpa-onnx format instead (encoder/decoder/joiner)"
+    exit 1
+else
+    log_error "No valid ONNX model files found!"
+    log_error "Expected either encoder.onnx (sherpa format) or model.onnx (HuggingFace format)"
+    ls -la "${PARAKEET_DIR}/1/"
+    exit 1
 fi
 
 log_info "Config written: ${PARAKEET_DIR}/config.pbtxt"
