@@ -33,8 +33,10 @@ if [ -f "${DEPLOY_DIR}/.env" ]; then
 fi
 
 # Configuration
-MODEL_NAME="Qwen/Qwen3-8B-Instruct"
-MODEL_DIR_NAME="Qwen3-8B-Instruct"
+# Note: Qwen3-8B is already instruct-capable (no separate -Instruct variant)
+# Qwen3-8B-Base is the pretrained-only version
+MODEL_NAME="Qwen/Qwen3-8B"
+MODEL_DIR_NAME="Qwen3-8B"
 QUANTIZATION="${2:-int8_sq}"  # Options: fp8, int8_sq, int4_awq, none
 
 # =============================================================================
