@@ -50,7 +50,8 @@ RUN pip install --no-cache-dir \
         s3tokenizer \
         onnx \
         openai-whisper \
-        wget
+        wget \
+        gdown
 
 # Install CosyVoice and Matcha-TTS from source (not pip packages, just add to PYTHONPATH)
 # Use --only-binary for grpcio to prevent slow source builds

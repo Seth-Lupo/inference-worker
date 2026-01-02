@@ -109,7 +109,19 @@ download_from_huggingface() {
         git clone --depth 1 "https://huggingface.co/${HF_REPO}" "${WORK_DIR}/parakeet_onnx" && {
             cp "${WORK_DIR}/parakeet_onnx"/*.onnx "${PARAKEET_DIR}/1/" 2>/dev/null || true
             cp "${WORK_DIR}/parakeet_onnx"/*.txt "${PARAKEET_DIR}/1/" 2>/dev/null || true
-            return 0
+
+            # Validate files were actually copied (not just LFS pointers)
+            if ls "${PARAKEET_DIR}/1/"*.onnx 1>/dev/null 2>&1; then
+                # Check file size > 1MB (LFS pointers are ~130 bytes)
+                for f in "${PARAKEET_DIR}/1/"*.onnx; do
+                    size=$(stat -c%s "$f" 2>/dev/null || stat -f%z "$f" 2>/dev/null || echo "0")
+                    if [ "$size" -gt 1000000 ]; then
+                        log_info "Downloaded real ONNX files from HuggingFace"
+                        return 0
+                    fi
+                done
+            fi
+            log_warn "HuggingFace clone got LFS pointers, not real files"
         }
     fi
 
