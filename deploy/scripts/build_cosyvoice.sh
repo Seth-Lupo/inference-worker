@@ -379,17 +379,21 @@ if [[ $START_STAGE -le 1 ]] && [[ $STOP_STAGE -ge 1 ]]; then
             set -e
 
             echo '=== TensorRT-LLM Version Check ==='
-            python3 -c 'import tensorrt_llm; print(f\"TRT-LLM version: {tensorrt_llm.__version__}\")'
+            TRTLLM_VERSION=\$(python3 -c 'import tensorrt_llm; print(tensorrt_llm.__version__)' 2>/dev/null | tail -1)
+            echo \"TRT-LLM version: \${TRTLLM_VERSION}\"
+
+            echo '=== Installing CosyVoice dependencies ==='
+            pip install -q transformers sentencepiece accelerate 2>/dev/null || true
 
             # Convert checkpoint to TensorRT weights using CosyVoice's script
-            echo 'Converting checkpoint to TensorRT weights...'
+            echo '=== Converting checkpoint to TensorRT weights ==='
             python3 /workspace/CosyVoice/runtime/triton_trtllm/scripts/convert_checkpoint.py \
                 --model_dir ./cosyvoice2_llm \
                 --output_dir ${TRT_WEIGHTS_DIR} \
                 --dtype ${TRT_DTYPE}
 
             # Build TensorRT engines
-            echo 'Building TensorRT engines...'
+            echo '=== Building TensorRT engines ==='
             trtllm-build \
                 --checkpoint_dir ${TRT_WEIGHTS_DIR} \
                 --output_dir ${TRT_ENGINES_DIR} \
@@ -397,7 +401,8 @@ if [[ $START_STAGE -le 1 ]] && [[ $STOP_STAGE -ge 1 ]]; then
                 --max_num_tokens 32768 \
                 --gemm_plugin ${TRT_DTYPE}
 
-            echo 'TensorRT engines built successfully!'
+            echo '=== TensorRT engines built successfully! ==='
+            ls -la ${TRT_ENGINES_DIR}
         "
 
     log_info "Stage 1 complete: Engines at ${WORK_DIR}/trt_engines_${TRT_DTYPE}"

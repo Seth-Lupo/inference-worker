@@ -39,7 +39,7 @@ fi
 # Qwen3-8B-Base is the pretrained-only version
 MODEL_NAME="Qwen/Qwen3-8B"
 MODEL_DIR_NAME="Qwen3-8B"
-QUANTIZATION="${1:-int8_sq}"  # Options: fp8, int8_sq, int4_awq, none
+QUANTIZATION="${1:-int8_sq}"  # Options: fp8, int8_sq, int4 (or int4_awq), none
 
 # =============================================================================
 # Handle cleanup command
@@ -352,15 +352,17 @@ build_engine() {
                     --per_channel \
                     --int8_kv_cache
 
-            elif [ '${QUANTIZATION}' == 'int4_awq' ]; then
-                # INT4 AWQ (smallest, good for memory-constrained)
-                echo 'Quantizing with INT4 AWQ...'
+            elif [ '${QUANTIZATION}' == 'int4_awq' ] || [ '${QUANTIZATION}' == 'int4' ]; then
+                # INT4 weight-only (smallest, good for memory-constrained)
+                echo 'Quantizing with INT4 weight-only...'
                 python3 convert_checkpoint.py \
                     --model_dir \$MODEL_DIR \
                     --output_dir \$CHECKPOINT_DIR \
                     --dtype float16 \
                     --use_weight_only \
-                    --weight_only_precision int4_awq
+                    --weight_only_precision int4 \
+                    --per_group \
+                    --group_size 128
 
             else
                 echo 'Unknown quantization: ${QUANTIZATION}'
