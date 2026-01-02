@@ -338,10 +338,11 @@ if [[ $START_STAGE -le 2 ]] && [[ $STOP_STAGE -ge 2 ]]; then
         exit 1
     fi
 
-    # Configuration
-    ENGINE_PATH="${WORK_DIR}/trt_engines_${TRT_DTYPE}"
-    MODEL_DIR="${WORK_DIR}/CosyVoice2-0.5B"
-    LLM_TOKENIZER_DIR="${WORK_DIR}/cosyvoice2_llm"
+    # Configuration - paths relative to container mount point /models/cosyvoice2_full
+    # These get baked into the config.pbtxt files
+    ENGINE_PATH="/models/cosyvoice2_full/tensorrt_llm/1/engine"
+    MODEL_DIR="/models/cosyvoice2_full/assets"
+    LLM_TOKENIZER_DIR="/models/cosyvoice2_full/assets/cosyvoice2_llm"
     MAX_QUEUE_DELAY_MICROSECONDS=0
     BLS_INSTANCE_NUM=4
     TRITON_MAX_BATCH_SIZE=16
@@ -365,6 +366,21 @@ if [[ $START_STAGE -le 2 ]] && [[ $STOP_STAGE -ge 2 ]]; then
 
     python3 scripts/fill_template.py -i "${MODEL_REPO}/speaker_embedding/config.pbtxt" \
         "model_dir:${MODEL_DIR},triton_max_batch_size:${TRITON_MAX_BATCH_SIZE},max_queue_delay_microseconds:${MAX_QUEUE_DELAY_MICROSECONDS}"
+
+    # Copy assets into model repo for self-contained deployment
+    log_info "Copying assets into model repository..."
+    mkdir -p "${MODEL_REPO}/assets"
+
+    # Copy CosyVoice model files
+    cp -r "${WORK_DIR}/CosyVoice2-0.5B"/* "${MODEL_REPO}/assets/" 2>/dev/null || true
+
+    # Copy LLM tokenizer
+    mkdir -p "${MODEL_REPO}/assets/cosyvoice2_llm"
+    cp -r "${WORK_DIR}/cosyvoice2_llm"/* "${MODEL_REPO}/assets/cosyvoice2_llm/" 2>/dev/null || true
+
+    # Copy TensorRT engines into the tensorrt_llm model version directory
+    mkdir -p "${MODEL_REPO}/tensorrt_llm/1/engine"
+    cp -r "${WORK_DIR}/trt_engines_${TRT_DTYPE}"/* "${MODEL_REPO}/tensorrt_llm/1/engine/" 2>/dev/null || true
 
     log_info "Stage 2 complete: Model repo at ${MODEL_REPO}"
 fi

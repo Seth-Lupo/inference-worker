@@ -5,7 +5,8 @@ services:
   # Triton Inference Server with TensorRT-LLM Backend
   # =============================================================================
   triton:
-    image: nvcr.io/nvidia/tritonserver:24.12-trtllm-python-py3
+    # Full Triton image with ONNX Runtime + TensorRT-LLM + Python backends
+    image: nvcr.io/nvidia/tritonserver:24.12-py3
     container_name: voice-agent-triton
     restart: unless-stopped
 
@@ -30,9 +31,14 @@ services:
       - "8002:8002"   # Metrics
 
     volumes:
-      # Model repository
+      # Model repository (base models: silero_vad, parakeet_tdt, qwen3_8b)
       - ./model_repository:/models:ro
-      # Engine cache (persist built TensorRT engines)
+      # Mount built Qwen3 TensorRT-LLM engine
+      - ./qwen3_build/engine_int4_awq:/models/qwen3_8b/1/engine:ro
+      # Mount CosyVoice2 full model repo (5 models with Python backends)
+      # Built by: ./scripts/build_cosyvoice.sh -1 2
+      - ./model_repository/cosyvoice2_full:/models/cosyvoice2_full:ro
+      # Engine cache
       - ./engine_cache:/engine_cache
       # Logs
       - ./logs/triton:/var/log/triton
@@ -44,6 +50,7 @@ services:
     command: >
       tritonserver
       --model-repository=/models
+      --model-repository=/models/cosyvoice2_full
       --log-verbose=1
       --log-info=true
       --log-warning=true

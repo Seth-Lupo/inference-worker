@@ -12,6 +12,7 @@ import websockets
 from websockets.server import WebSocketServerProtocol
 
 from .agent_rail import AgentRail, AgentEvent
+from .tts_rail import create_tts_rail, TTSBackend
 
 logger = logging.getLogger(__name__)
 
@@ -26,12 +27,22 @@ class VoiceAgentServer:
     - Server sends JSON messages for events (transcript, state, etc.)
     """
 
-    def __init__(self, host: str = "0.0.0.0", port: int = 80):
+    def __init__(
+        self,
+        host: str = "0.0.0.0",
+        port: int = 80,
+        tts_backend: str = "mock",
+        triton_url: str = "localhost:8001",
+        tts_model: str = "cosyvoice2",
+    ):
         self.host = host
         self.port = port
+        self._tts_backend = TTSBackend(tts_backend)
+        self._triton_url = triton_url
+        self._tts_model = tts_model
         self._sessions: Dict[str, AgentRail] = {}
         self._server = None
-        logger.debug(f"VoiceAgentServer created: {host}:{port}")
+        logger.debug(f"VoiceAgentServer created: {host}:{port}, TTS: {tts_backend}")
 
     async def start(self) -> None:
         """Start the WebSocket server."""
@@ -64,10 +75,18 @@ class VoiceAgentServer:
         remote_addr = websocket.remote_address
         logger.info(f"New connection: session={session_id} from={remote_addr}")
 
+        # Create TTS rail for this session
+        logger.debug(f"[{session_id}] Creating TTS rail: {self._tts_backend.value}")
+        tts = create_tts_rail(
+            backend=self._tts_backend,
+            triton_url=self._triton_url,
+            model_name=self._tts_model,
+        )
+
         # Create agent rail for this session
         logger.debug(f"[{session_id}] Creating AgentRail...")
         agent_start = time.perf_counter()
-        agent = AgentRail()
+        agent = AgentRail(tts=tts)
         self._sessions[session_id] = agent
         logger.debug(f"[{session_id}] AgentRail created in {(time.perf_counter() - agent_start)*1000:.1f}ms")
 
@@ -176,10 +195,22 @@ class VoiceAgentServer:
         return len(self._sessions)
 
 
-async def run_server(host: str = "0.0.0.0", port: int = 80) -> None:
+async def run_server(
+    host: str = "0.0.0.0",
+    port: int = 80,
+    tts_backend: str = "mock",
+    triton_url: str = "localhost:8001",
+    tts_model: str = "cosyvoice2",
+) -> None:
     """Run the voice agent server."""
     logger.info(f"Starting voice agent server on {host}:{port}")
-    server = VoiceAgentServer(host, port)
+    server = VoiceAgentServer(
+        host=host,
+        port=port,
+        tts_backend=tts_backend,
+        triton_url=triton_url,
+        tts_model=tts_model,
+    )
     await server.start()
 
     # Keep running until interrupted

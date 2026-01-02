@@ -33,15 +33,39 @@ def main():
     parser.add_argument("--host", default="0.0.0.0", help="Host to bind to")
     parser.add_argument("--port", type=int, default=80, help="Port to listen on")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+
+    # TTS backend configuration
+    parser.add_argument(
+        "--tts-backend",
+        choices=["mock", "cosyvoice"],
+        default="mock",
+        help="TTS backend to use (default: mock)"
+    )
+    parser.add_argument(
+        "--triton-url",
+        default="localhost:8001",
+        help="Triton Inference Server gRPC URL (default: localhost:8001)"
+    )
+    parser.add_argument(
+        "--tts-model",
+        default="cosyvoice2",
+        help="TTS model name on Triton (default: cosyvoice2)"
+    )
+
     args = parser.parse_args()
 
     setup_logging(args.debug)
+
+    tts_info = f"TTS: {args.tts_backend}"
+    if args.tts_backend == "cosyvoice":
+        tts_info += f" ({args.triton_url}/{args.tts_model})"
 
     print(f"""
 ╔═══════════════════════════════════════════════════════════════╗
 ║           Voice Agent Inference Worker                        ║
 ╠═══════════════════════════════════════════════════════════════╣
 ║  WebSocket: ws://{args.host}:{args.port:<5}                              ║
+║  {tts_info:<61}║
 ║                                                               ║
 ║  Connect with a WebSocket client and send audio to test.     ║
 ║  Audio format: PCM16, 16kHz, mono                             ║
@@ -51,7 +75,13 @@ def main():
 """)
 
     try:
-        asyncio.run(run_server(args.host, args.port))
+        asyncio.run(run_server(
+            host=args.host,
+            port=args.port,
+            tts_backend=args.tts_backend,
+            triton_url=args.triton_url,
+            tts_model=args.tts_model,
+        ))
     except KeyboardInterrupt:
         print("\nShutting down...")
 
