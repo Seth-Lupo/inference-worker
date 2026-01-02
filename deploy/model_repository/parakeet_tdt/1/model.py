@@ -1,7 +1,7 @@
 """
 Parakeet TDT 0.6B V2 - Triton Python Backend
 
-Uses ONNX Runtime with CUDA for GPU inference.
+Uses ONNX Runtime with CUDA/TensorRT for GPU inference.
 Implements greedy transducer decoding without sherpa-onnx.
 """
 import os
@@ -14,20 +14,33 @@ class TritonPythonModel:
     """Parakeet TDT ASR using ONNX Runtime GPU."""
 
     def initialize(self, args):
-        """Load ONNX models with CUDA execution provider."""
+        """Load ONNX models with GPU execution provider."""
         import onnxruntime as ort
 
         self.model_config = json.loads(args["model_config"])
         model_dir = os.path.dirname(os.path.realpath(__file__))
 
-        # ONNX Runtime with CUDA
-        providers = [
-            ("CUDAExecutionProvider", {"device_id": 0}),
-            "CPUExecutionProvider",
-        ]
-
         pb_utils.Logger.log_info(f"Loading Parakeet models from {model_dir}")
         pb_utils.Logger.log_info(f"ONNX Runtime providers: {ort.get_available_providers()}")
+
+        # Try GPU providers in order: TensorRT > CUDA > CPU
+        available = ort.get_available_providers()
+        providers = []
+
+        if "TensorrtExecutionProvider" in available:
+            providers.append(("TensorrtExecutionProvider", {
+                "device_id": 0,
+                "trt_max_workspace_size": 2 * 1024 * 1024 * 1024,  # 2GB
+                "trt_fp16_enable": True,
+            }))
+            pb_utils.Logger.log_info("TensorRT provider enabled")
+
+        if "CUDAExecutionProvider" in available:
+            providers.append(("CUDAExecutionProvider", {"device_id": 0}))
+            pb_utils.Logger.log_info("CUDA provider enabled")
+
+        providers.append("CPUExecutionProvider")
+        pb_utils.Logger.log_info(f"Provider order: {[p[0] if isinstance(p, tuple) else p for p in providers]}")
 
         # Load transducer models
         self.encoder = ort.InferenceSession(

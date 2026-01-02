@@ -62,6 +62,9 @@ RUN git clone --recursive https://github.com/FunAudioLLM/CosyVoice.git /opt/Cosy
 # Add CosyVoice and Matcha-TTS to Python path
 ENV PYTHONPATH="/opt/CosyVoice:/opt/CosyVoice/third_party/Matcha-TTS:${PYTHONPATH}"
 
+# Fix LD_LIBRARY_PATH for onnxruntime-gpu to find CUDA libraries (libcublasLt.so.12, etc.)
+ENV LD_LIBRARY_PATH="/usr/local/cuda/lib64:/usr/local/tensorrt/lib:/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH}"
+
 # Triton 25.12-trtllm-python-py3 includes:
 # - TensorRT-LLM 1.0.0+ (Qwen3 TensorRT engine support)
 # - Triton Inference Server with tensorrtllm + python backends
