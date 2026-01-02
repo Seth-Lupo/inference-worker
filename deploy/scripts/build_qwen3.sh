@@ -1,8 +1,9 @@
 #!/bin/bash
 # =============================================================================
 # Build Qwen3 8B TensorRT-LLM Engine
-# Based on: https://github.com/NVIDIA/TensorRT-LLM/blob/main/examples/quantization/README.md
-#           https://github.com/NVIDIA/TensorRT-LLM/blob/main/examples/models/core/qwen/README.md
+# Uses dedicated TensorRT-LLM development container for building
+# Based on: https://github.com/NVIDIA/TensorRT-LLM
+#           https://github.com/NVIDIA/TensorRT-Model-Optimizer
 # =============================================================================
 set -e
 
@@ -21,6 +22,11 @@ log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
+# Container configuration
+# Use dedicated TensorRT-LLM development container (NOT tritonserver which is serving-only)
+TRTLLM_IMAGE="nvcr.io/nvidia/tensorrt-llm/release:0.16.0"
+TRTLLM_CONTAINER_NAME="trtllm-builder-qwen3"
+
 # Load environment
 if [ -f "${DEPLOY_DIR}/.env" ]; then
     source "${DEPLOY_DIR}/.env"
@@ -28,13 +34,57 @@ fi
 
 # Configuration
 MODEL_NAME="Qwen/Qwen3-8B"
-QUANTIZATION="${1:-int8_sq}"  # Options: fp8, int8_sq, int4_awq, none
+QUANTIZATION="${2:-int8_sq}"  # Options: fp8, int8_sq, int4_awq, none
+
+# =============================================================================
+# Handle cleanup command
+# =============================================================================
+if [ "$1" == "cleanup" ] || [ "$1" == "clean" ]; then
+    echo "=============================================="
+    echo "Cleaning up Qwen3 build artifacts"
+    echo "=============================================="
+
+    # Stop and remove container if running
+    if docker ps -a --format '{{.Names}}' | grep -q "^${TRTLLM_CONTAINER_NAME}$"; then
+        log_info "Removing container ${TRTLLM_CONTAINER_NAME}..."
+        docker rm -f "${TRTLLM_CONTAINER_NAME}" 2>/dev/null || true
+    fi
+
+    # Remove the TensorRT-LLM image (it's large ~20GB)
+    if [ "$2" == "--image" ] || [ "$2" == "-i" ]; then
+        log_info "Removing TensorRT-LLM image ${TRTLLM_IMAGE}..."
+        docker rmi "${TRTLLM_IMAGE}" 2>/dev/null || true
+        log_info "Image removed"
+    else
+        log_info "To also remove the Docker image (~20GB), run:"
+        log_info "  $0 cleanup --image"
+    fi
+
+    # Optionally remove build artifacts
+    if [ "$2" == "--all" ] || [ "$3" == "--all" ]; then
+        log_warn "Removing all build artifacts at ${WORK_DIR}..."
+        rm -rf "${WORK_DIR}"
+        log_info "Build directory removed"
+    else
+        log_info "Build artifacts preserved at ${WORK_DIR}"
+        log_info "To remove them, run:"
+        log_info "  $0 cleanup --all"
+    fi
+
+    exit 0
+fi
 
 echo "=============================================="
 echo "Building Qwen3 8B TensorRT-LLM Engine"
 echo "=============================================="
 echo "Model: ${MODEL_NAME}"
 echo "Quantization: ${QUANTIZATION}"
+echo "Build container: ${TRTLLM_IMAGE}"
+echo ""
+echo "To cleanup after building:"
+echo "  $0 cleanup          # Remove container only"
+echo "  $0 cleanup --image  # Also remove Docker image (~20GB)"
+echo "  $0 cleanup --all    # Remove everything including downloads"
 echo ""
 
 mkdir -p "${WORK_DIR}"
@@ -129,6 +179,20 @@ download_model() {
 }
 
 # =============================================================================
+# Pull TensorRT-LLM Development Container
+# =============================================================================
+pull_container() {
+    log_info "Checking for TensorRT-LLM development container..."
+
+    if docker images --format '{{.Repository}}:{{.Tag}}' | grep -q "^${TRTLLM_IMAGE}$"; then
+        log_info "Container image already exists"
+    else
+        log_info "Pulling ${TRTLLM_IMAGE} (this may take a while, ~20GB)..."
+        docker pull "${TRTLLM_IMAGE}"
+    fi
+}
+
+# =============================================================================
 # Quantize and Build Engine
 # =============================================================================
 build_engine() {
@@ -144,18 +208,24 @@ build_engine() {
         return 0
     fi
 
-    # Run quantization and build inside TensorRT-LLM container
+    # Ensure we have the container
+    pull_container
+
+    # Run quantization and build inside dedicated TensorRT-LLM development container
+    # This container has all the quantization tools (ModelOpt) pre-installed
+    log_info "Starting build in container ${TRTLLM_IMAGE}..."
+
     docker run --rm --gpus all \
+        --name "${TRTLLM_CONTAINER_NAME}" \
         --shm-size=16g \
         --ulimit memlock=-1 \
         --ulimit stack=67108864 \
         -v "${WORK_DIR}:/workspace/build" \
         -w /workspace \
         -e HF_TOKEN="${HF_TOKEN}" \
-        nvcr.io/nvidia/tritonserver:24.12-trtllm-python-py3 \
+        "${TRTLLM_IMAGE}" \
         bash -c "
             set -e
-            cd /app/tensorrt_llm/examples/quantization
 
             MODEL_DIR=/workspace/build/Qwen3-8B
             CHECKPOINT_DIR=/workspace/build/checkpoint_${QUANTIZATION}
@@ -163,10 +233,13 @@ build_engine() {
 
             echo '=== Step 1: Quantizing model ==='
 
+            # The TensorRT-LLM container has quantize.py in examples/quantization
+            cd /app/tensorrt_llm/examples/quantization
+
             if [ '${QUANTIZATION}' == 'none' ]; then
                 # No quantization - just convert checkpoint
                 echo 'Converting without quantization (FP16)...'
-                python quantize.py \
+                python3 quantize.py \
                     --model_dir \$MODEL_DIR \
                     --output_dir \$CHECKPOINT_DIR \
                     --dtype float16
@@ -174,7 +247,7 @@ build_engine() {
             elif [ '${QUANTIZATION}' == 'fp8' ]; then
                 # FP8 quantization (best for Hopper/Ada GPUs)
                 echo 'Quantizing to FP8...'
-                python quantize.py \
+                python3 quantize.py \
                     --model_dir \$MODEL_DIR \
                     --qformat fp8 \
                     --kv_cache_dtype fp8 \
@@ -183,7 +256,7 @@ build_engine() {
             elif [ '${QUANTIZATION}' == 'int8_sq' ]; then
                 # INT8 SmoothQuant (good balance, works on older GPUs)
                 echo 'Quantizing with INT8 SmoothQuant...'
-                python quantize.py \
+                python3 quantize.py \
                     --model_dir \$MODEL_DIR \
                     --qformat int8_sq \
                     --kv_cache_dtype int8 \
@@ -192,7 +265,7 @@ build_engine() {
             elif [ '${QUANTIZATION}' == 'int4_awq' ]; then
                 # INT4 AWQ (smallest, good for memory-constrained)
                 echo 'Quantizing with INT4 AWQ...'
-                python quantize.py \
+                python3 quantize.py \
                     --model_dir \$MODEL_DIR \
                     --qformat int4_awq \
                     --awq_block_size 128 \
@@ -360,6 +433,16 @@ main() {
     echo ""
     echo "Or start Triton:"
     echo "  docker-compose up -d triton"
+    echo ""
+    echo "=============================================="
+    echo "Cleanup Options"
+    echo "=============================================="
+    echo ""
+    echo "The TensorRT-LLM dev container (~20GB) can be removed after building:"
+    echo "  $0 cleanup          # Just remove any stopped containers"
+    echo "  $0 cleanup --image  # Remove the Docker image to free ~20GB"
+    echo "  $0 cleanup --all    # Remove image + all downloaded models/checkpoints"
+    echo ""
 }
 
 main

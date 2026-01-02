@@ -22,24 +22,31 @@ CLEAN_ALL=false
 CLEAN_ENGINES=false
 CLEAN_DOWNLOADS=false
 CLEAN_CACHE=false
+CLEAN_IMAGES=false
 CLEAN_MODEL=""
+
+# TensorRT-LLM development image (~20GB)
+TRTLLM_IMAGE="nvcr.io/nvidia/tensorrt-llm/release:0.16.0"
 
 show_help() {
     echo "Usage: $0 [OPTIONS]"
     echo ""
     echo "Options:"
-    echo "  --all           Clean everything"
+    echo "  --all           Clean everything (except Docker images)"
     echo "  --engines       Clean built TensorRT engines only"
     echo "  --downloads     Clean downloaded model files only"
     echo "  --cache         Clean engine cache only"
+    echo "  --images        Clean TensorRT-LLM Docker images (~20GB)"
     echo "  --model NAME    Clean specific model (silero_vad, parakeet_tdt, qwen3_8b, cosyvoice2)"
     echo "  --dry-run       Show what would be deleted without deleting"
     echo "  --help          Show this help"
     echo ""
     echo "Examples:"
-    echo "  $0 --all                    # Clean everything"
+    echo "  $0 --all                    # Clean everything (keeps Docker images)"
+    echo "  $0 --all --images           # Clean everything including Docker images"
     echo "  $0 --model qwen3_8b         # Clean only Qwen3"
     echo "  $0 --engines --dry-run      # Preview engine cleanup"
+    echo "  $0 --images                 # Free ~20GB by removing build container"
 }
 
 DRY_RUN=false
@@ -61,6 +68,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --cache)
             CLEAN_CACHE=true
+            shift
+            ;;
+        --images)
+            CLEAN_IMAGES=true
             shift
             ;;
         --model)
@@ -86,7 +97,7 @@ done
 # Default to showing help if no options
 if [ "$CLEAN_ALL" = false ] && [ "$CLEAN_ENGINES" = false ] && \
    [ "$CLEAN_DOWNLOADS" = false ] && [ "$CLEAN_CACHE" = false ] && \
-   [ -z "$CLEAN_MODEL" ]; then
+   [ "$CLEAN_IMAGES" = false ] && [ -z "$CLEAN_MODEL" ]; then
     show_help
     exit 0
 fi
@@ -184,6 +195,39 @@ if [ "$CLEAN_ALL" = true ] || [ "$CLEAN_CACHE" = true ]; then
 fi
 
 # =============================================================================
+# Clean Docker images
+# =============================================================================
+if [ "$CLEAN_IMAGES" = true ]; then
+    echo "Cleaning Docker images..."
+    echo ""
+
+    # Remove any stopped builder containers first
+    for container in trtllm-builder-qwen3 trtllm-builder-cosyvoice; do
+        if docker ps -a --format '{{.Names}}' | grep -q "^${container}$"; then
+            if [ "$DRY_RUN" = true ]; then
+                echo -e "${YELLOW}[DRY-RUN]${NC} Would remove container: $container"
+            else
+                echo -e "${RED}Removing container:${NC} $container"
+                docker rm -f "$container" 2>/dev/null || true
+            fi
+        fi
+    done
+
+    # Remove TensorRT-LLM image
+    if docker images --format '{{.Repository}}:{{.Tag}}' | grep -q "^${TRTLLM_IMAGE}$"; then
+        IMAGE_SIZE=$(docker images --format '{{.Size}}' "${TRTLLM_IMAGE}" 2>/dev/null || echo "unknown")
+        if [ "$DRY_RUN" = true ]; then
+            echo -e "${YELLOW}[DRY-RUN]${NC} Would remove image: ${TRTLLM_IMAGE} (${IMAGE_SIZE})"
+        else
+            echo -e "${RED}Removing image:${NC} ${TRTLLM_IMAGE} (${IMAGE_SIZE})"
+            docker rmi "${TRTLLM_IMAGE}" 2>/dev/null || true
+        fi
+    else
+        echo "TensorRT-LLM image not found (already removed or never pulled)"
+    fi
+fi
+
+# =============================================================================
 # Summary
 # =============================================================================
 echo ""
@@ -199,3 +243,14 @@ echo ""
 echo "Current disk usage:"
 du -sh "${DEPLOY_DIR}/model_repository" 2>/dev/null || echo "  model_repository: (empty)"
 du -sh "${DEPLOY_DIR}"/*_build 2>/dev/null || echo "  build dirs: (empty)"
+
+# Show Docker images
+echo ""
+echo "Docker images:"
+if docker images --format '{{.Repository}}:{{.Tag}} {{.Size}}' | grep -E "(tensorrt-llm|tritonserver)" 2>/dev/null; then
+    :
+else
+    echo "  No TensorRT-LLM/Triton images found"
+fi
+echo ""
+echo "To remove the TensorRT-LLM build image (~20GB): $0 --images"

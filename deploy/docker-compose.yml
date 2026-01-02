@@ -99,7 +99,7 @@ services:
   # Model Builder (One-off container for building TensorRT engines)
   # =============================================================================
   model-builder:
-    image: nvcr.io/nvidia/tritonserver:24.12-trtllm-python-py3
+    image: docker
     container_name: voice-agent-model-builder
     profiles: ["build"]  # Only runs with: docker compose --profile build up model-builder
 

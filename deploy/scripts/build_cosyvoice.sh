@@ -19,6 +19,11 @@ log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
+# Container configuration
+# Use dedicated TensorRT-LLM development container for building engines
+TRTLLM_IMAGE="nvcr.io/nvidia/tensorrt-llm/release:0.16.0"
+TRTLLM_CONTAINER_NAME="trtllm-builder-cosyvoice"
+
 # Load environment
 if [ -f "${DEPLOY_DIR}/.env" ]; then
     source "${DEPLOY_DIR}/.env"
@@ -30,6 +35,44 @@ HF_MODEL="yuekai/cosyvoice2_llm"
 MODELSCOPE_MODEL="iic/CosyVoice2-0.5B"
 TRT_DTYPE="bfloat16"
 
+# =============================================================================
+# Handle cleanup command
+# =============================================================================
+if [ "$1" == "cleanup" ] || [ "$1" == "clean" ]; then
+    echo "=============================================="
+    echo "Cleaning up CosyVoice build artifacts"
+    echo "=============================================="
+
+    # Stop and remove container if running
+    if docker ps -a --format '{{.Names}}' | grep -q "^${TRTLLM_CONTAINER_NAME}$"; then
+        log_info "Removing container ${TRTLLM_CONTAINER_NAME}..."
+        docker rm -f "${TRTLLM_CONTAINER_NAME}" 2>/dev/null || true
+    fi
+
+    # Remove the TensorRT-LLM image (it's large ~20GB)
+    if [ "$2" == "--image" ] || [ "$2" == "-i" ]; then
+        log_info "Removing TensorRT-LLM image ${TRTLLM_IMAGE}..."
+        docker rmi "${TRTLLM_IMAGE}" 2>/dev/null || true
+        log_info "Image removed"
+    else
+        log_info "To also remove the Docker image (~20GB), run:"
+        log_info "  $0 cleanup --image"
+    fi
+
+    # Optionally remove build artifacts
+    if [ "$2" == "--all" ] || [ "$3" == "--all" ]; then
+        log_warn "Removing all build artifacts at ${WORK_DIR}..."
+        rm -rf "${WORK_DIR}"
+        log_info "Build directory removed"
+    else
+        log_info "Build artifacts preserved at ${WORK_DIR}"
+        log_info "To remove them, run:"
+        log_info "  $0 cleanup --all"
+    fi
+
+    exit 0
+fi
+
 # Stages to run (default: all)
 START_STAGE=${1:-0}
 STOP_STAGE=${2:-3}
@@ -38,6 +81,12 @@ echo "=============================================="
 echo "Building CosyVoice 2 TensorRT-LLM"
 echo "=============================================="
 echo "Stages: ${START_STAGE} to ${STOP_STAGE}"
+echo "Build container: ${TRTLLM_IMAGE}"
+echo ""
+echo "To cleanup after building:"
+echo "  $0 cleanup          # Remove container only"
+echo "  $0 cleanup --image  # Also remove Docker image (~20GB)"
+echo "  $0 cleanup --all    # Remove everything including downloads"
 echo ""
 
 mkdir -p "${WORK_DIR}"
@@ -147,6 +196,20 @@ if [ $START_STAGE -le 0 ] && [ $STOP_STAGE -ge 0 ]; then
 fi
 
 # =============================================================================
+# Pull TensorRT-LLM Development Container
+# =============================================================================
+pull_container() {
+    log_info "Checking for TensorRT-LLM development container..."
+
+    if docker images --format '{{.Repository}}:{{.Tag}}' | grep -q "^${TRTLLM_IMAGE}$"; then
+        log_info "Container image already exists"
+    else
+        log_info "Pulling ${TRTLLM_IMAGE} (this may take a while, ~20GB)..."
+        docker pull "${TRTLLM_IMAGE}"
+    fi
+}
+
+# =============================================================================
 # Stage 1: Convert to TensorRT-LLM and Build Engines
 # =============================================================================
 if [ $START_STAGE -le 1 ] && [ $STOP_STAGE -ge 1 ]; then
@@ -155,8 +218,15 @@ if [ $START_STAGE -le 1 ] && [ $STOP_STAGE -ge 1 ]; then
     TRT_WEIGHTS_DIR="./trt_weights_${TRT_DTYPE}"
     TRT_ENGINES_DIR="./trt_engines_${TRT_DTYPE}"
 
-    # This must run inside the Triton container with TensorRT-LLM
+    # Ensure we have the container
+    pull_container
+
+    # Run inside TensorRT-LLM development container
+    # Uses CosyVoice's custom convert_checkpoint.py + trtllm-build
+    log_info "Starting build in container ${TRTLLM_IMAGE}..."
+
     docker run --rm --gpus all \
+        --name "${TRTLLM_CONTAINER_NAME}" \
         --shm-size=8g \
         --ulimit memlock=-1 \
         --ulimit stack=67108864 \
@@ -164,11 +234,11 @@ if [ $START_STAGE -le 1 ] && [ $STOP_STAGE -ge 1 ]; then
         -v "${WORK_DIR}/CosyVoice:/workspace/CosyVoice" \
         -w /workspace/build \
         -e PYTHONPATH=/workspace/CosyVoice:/workspace/CosyVoice/third_party/Matcha-TTS \
-        nvcr.io/nvidia/tritonserver:24.12-trtllm-python-py3 \
+        "${TRTLLM_IMAGE}" \
         bash -c "
             set -e
 
-            # Convert checkpoint to TensorRT weights
+            # Convert checkpoint to TensorRT weights using CosyVoice's script
             echo 'Converting checkpoint to TensorRT weights...'
             python3 /workspace/CosyVoice/runtime/triton_trtllm/scripts/convert_checkpoint.py \
                 --model_dir ./cosyvoice2_llm \
@@ -265,3 +335,13 @@ echo "=============================================="
 echo ""
 echo "Model components:"
 ls -la "${DEPLOY_DIR}/model_repository/cosyvoice2_full/" 2>/dev/null || echo "Run stages 0-2 to build"
+echo ""
+echo "=============================================="
+echo "Cleanup Options"
+echo "=============================================="
+echo ""
+echo "The TensorRT-LLM dev container (~20GB) can be removed after building:"
+echo "  $0 cleanup          # Just remove any stopped containers"
+echo "  $0 cleanup --image  # Remove the Docker image to free ~20GB"
+echo "  $0 cleanup --all    # Remove image + all downloaded models/checkpoints"
+echo ""
