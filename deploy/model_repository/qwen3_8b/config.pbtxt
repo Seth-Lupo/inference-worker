@@ -104,17 +104,12 @@ parameters {
 
 parameters {
   key: "xgrammar_tokenizer_info_path"
-  value: { string_value: "/models/qwen3_8b/1/tokenizer" }
+  value: { string_value: "${xgrammar_tokenizer_info_path}" }
 }
 
 parameters {
   key: "guided_decoding_backend"
-  value: { string_value: "xgrammar" }
-}
-
-parameters {
-  key: "max_tokens_in_paged_kv_cache"
-  value: { string_value: "8192" }
+  value: { string_value: "${guided_decoding_backend}" }
 }
 
 parameters {
@@ -124,7 +119,7 @@ parameters {
 
 parameters {
   key: "kv_cache_free_gpu_mem_fraction"
-  value: { string_value: "0.70" }
+  value: { string_value: "0.5" }
 }
 
 version_policy: { latest: { num_versions: 1 } }
