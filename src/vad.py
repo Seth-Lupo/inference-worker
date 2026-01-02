@@ -38,7 +38,7 @@ class SileroVAD:
         self,
         threshold: float = 0.5,
         min_speech_duration_ms: int = 250,
-        min_silence_duration_ms: int = 500,
+        min_silence_duration_ms: int = 200,
     ):
         """
         Initialize Silero VAD.
