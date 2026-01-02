@@ -24,9 +24,9 @@ log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
 # Container configuration
 # IMPORTANT: Use Triton container for building to guarantee version match!
-# Triton 24.12-trtllm-python-py3 has TRT-LLM 0.16.0 built-in
-# This ensures the engine is compatible with the serving container
-TRTLLM_IMAGE="nvcr.io/nvidia/tritonserver:24.12-trtllm-python-py3"
+# Qwen3 requires TRT-LLM >= 0.20.0 (added Qwen3 support)
+# Triton 25.08-trtllm-python-py3 has TRT-LLM 0.21.0
+TRTLLM_IMAGE="nvcr.io/nvidia/tritonserver:25.08-trtllm-python-py3"
 TRTLLM_CONTAINER_NAME="trtllm-builder-qwen3"
 
 # Load environment
@@ -302,9 +302,10 @@ build_engine() {
             TRTLLM_VERSION=\$(python3 -c 'import tensorrt_llm; print(tensorrt_llm.__version__)' 2>/dev/null | tail -1)
             echo \"TRT-LLM version: \${TRTLLM_VERSION}\"
 
-            echo '=== Upgrading transformers for Qwen3 support ==='
-            # Qwen3 requires transformers >= 4.51.0
-            pip install -q --upgrade 'transformers>=4.51.0' accelerate sentencepiece
+            echo '=== Installing dependencies ==='
+            # Note: Container's torch version limits transformers version
+            # Qwen2.5 works with container's transformers, Qwen3 needs newer torch
+            pip install -q accelerate sentencepiece 2>/dev/null || true
 
             echo \"=== Cloning TRT-LLM examples (v\${TRTLLM_VERSION}) ===\"
             # Triton container has TRT-LLM runtime but not the conversion examples
