@@ -1,8 +1,8 @@
 """
 Parakeet TDT 0.6B V2 - Triton Python Backend
-Wraps ONNX model using sherpa-onnx for transducer-based ASR.
 
-This runs on GPU via CUDA provider for fast inference.
+Uses ONNX Runtime with CUDA for GPU inference.
+Implements greedy transducer decoding without sherpa-onnx.
 """
 import os
 import json
@@ -11,190 +11,198 @@ import triton_python_backend_utils as pb_utils
 
 
 class TritonPythonModel:
-    """Triton Python backend for Parakeet TDT ASR."""
+    """Parakeet TDT ASR using ONNX Runtime GPU."""
 
     def initialize(self, args):
-        """Load the sherpa-onnx recognizer."""
+        """Load ONNX models with CUDA execution provider."""
+        import onnxruntime as ort
+
         self.model_config = json.loads(args["model_config"])
         model_dir = os.path.dirname(os.path.realpath(__file__))
 
-        # Try to import sherpa_onnx
-        try:
-            import sherpa_onnx
-            self._use_sherpa = True
-        except ImportError:
-            pb_utils.Logger.log_warn(
-                "sherpa_onnx not found, falling back to onnxruntime"
-            )
-            self._use_sherpa = False
+        # ONNX Runtime with CUDA
+        providers = [
+            ("CUDAExecutionProvider", {"device_id": 0}),
+            "CPUExecutionProvider",
+        ]
 
-        if self._use_sherpa:
-            self._init_sherpa(model_dir)
-        else:
-            self._init_onnxruntime(model_dir)
+        pb_utils.Logger.log_info(f"Loading Parakeet models from {model_dir}")
+        pb_utils.Logger.log_info(f"ONNX Runtime providers: {ort.get_available_providers()}")
 
-        pb_utils.Logger.log_info("Parakeet TDT initialized")
+        # Load transducer models
+        self.encoder = ort.InferenceSession(
+            os.path.join(model_dir, "encoder.onnx"),
+            providers=providers,
+        )
+        self.decoder = ort.InferenceSession(
+            os.path.join(model_dir, "decoder.onnx"),
+            providers=providers,
+        )
+        self.joiner = ort.InferenceSession(
+            os.path.join(model_dir, "joiner.onnx"),
+            providers=providers,
+        )
 
-    def _init_sherpa(self, model_dir):
-        """Initialize using sherpa-onnx (handles transducer decoding)."""
-        import sherpa_onnx
+        # Load vocabulary
+        self.vocab = self._load_vocab(os.path.join(model_dir, "tokens.txt"))
+        self.blank_id = 0  # Usually 0 for transducers
 
-        # Check for transducer format (encoder/decoder/joiner)
-        encoder_path = os.path.join(model_dir, "encoder.onnx")
-        decoder_path = os.path.join(model_dir, "decoder.onnx")
-        joiner_path = os.path.join(model_dir, "joiner.onnx")
-        tokens_path = os.path.join(model_dir, "tokens.txt")
+        pb_utils.Logger.log_info(
+            f"Parakeet initialized: vocab_size={len(self.vocab)}, "
+            f"using {self.encoder.get_providers()[0]}"
+        )
 
-        if all(os.path.exists(p) for p in [encoder_path, decoder_path, joiner_path, tokens_path]):
-            pb_utils.Logger.log_info("Using transducer model format with CUDA")
-            # Try CUDA first, fall back to CPU if it fails
-            try:
-                self.recognizer = sherpa_onnx.OfflineRecognizer.from_transducer(
-                    encoder=encoder_path,
-                    decoder=decoder_path,
-                    joiner=joiner_path,
-                    tokens=tokens_path,
-                    num_threads=4,
-                    provider="cuda",
-                )
-                pb_utils.Logger.log_info("sherpa-onnx CUDA provider initialized")
-            except Exception as e:
-                pb_utils.Logger.log_warn(f"CUDA provider failed: {e}, trying TensorRT")
-                try:
-                    self.recognizer = sherpa_onnx.OfflineRecognizer.from_transducer(
-                        encoder=encoder_path,
-                        decoder=decoder_path,
-                        joiner=joiner_path,
-                        tokens=tokens_path,
-                        num_threads=4,
-                        provider="tensorrt",
-                    )
-                    pb_utils.Logger.log_info("sherpa-onnx TensorRT provider initialized")
-                except Exception as e2:
-                    pb_utils.Logger.log_error(f"TensorRT also failed: {e2}")
-                    raise
-        else:
-            # Try single model format
-            model_path = os.path.join(model_dir, "model.onnx")
-            if not os.path.exists(model_path):
-                model_path = os.path.join(model_dir, "model_fp16.onnx")
-
-            tokens_path = os.path.join(model_dir, "tokens.txt")
-            if not os.path.exists(tokens_path):
-                # Try to find vocab.json and convert
-                vocab_path = os.path.join(model_dir, "vocab.json")
-                if os.path.exists(vocab_path):
-                    self._convert_vocab_to_tokens(vocab_path, tokens_path)
-
-            pb_utils.Logger.log_info(f"Using single model format: {model_path}")
-            self.recognizer = sherpa_onnx.OfflineRecognizer.from_nemo_ctc(
-                model=model_path,
-                tokens=tokens_path,
-                num_threads=4,
-                provider="cuda",
-            )
-
-    def _init_onnxruntime(self, model_dir):
-        """Fallback to raw onnxruntime (limited functionality)."""
-        import onnxruntime as ort
-
-        model_path = os.path.join(model_dir, "model.onnx")
-        if not os.path.exists(model_path):
-            model_path = os.path.join(model_dir, "encoder.onnx")
-
-        providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
-        self.session = ort.InferenceSession(model_path, providers=providers)
-
-        # Load vocabulary for decoding
-        vocab_path = os.path.join(model_dir, "vocab.json")
-        tokens_path = os.path.join(model_dir, "tokens.txt")
-
-        self.vocab = {}
-        if os.path.exists(vocab_path):
-            with open(vocab_path) as f:
-                self.vocab = json.load(f)
-        elif os.path.exists(tokens_path):
-            with open(tokens_path) as f:
-                for idx, line in enumerate(f):
-                    token = line.strip().split()[0] if line.strip() else ""
-                    self.vocab[idx] = token
-
-        self.recognizer = None
-
-    def _convert_vocab_to_tokens(self, vocab_path, tokens_path):
-        """Convert vocab.json to tokens.txt format."""
-        with open(vocab_path) as f:
-            vocab = json.load(f)
-
-        with open(tokens_path, "w") as f:
-            for token, idx in sorted(vocab.items(), key=lambda x: x[1]):
-                f.write(f"{token} {idx}\n")
+    def _load_vocab(self, path):
+        """Load token vocabulary."""
+        vocab = {}
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                parts = line.strip().split()
+                if len(parts) >= 2:
+                    token, idx = parts[0], int(parts[1])
+                    vocab[idx] = token
+                elif len(parts) == 1:
+                    # Some formats have just the token, idx is line number
+                    vocab[len(vocab)] = parts[0]
+        return vocab
 
     def execute(self, requests):
-        """Run inference on batch of audio inputs."""
+        """Run inference on audio."""
         responses = []
 
         for request in requests:
-            # Get input tensors
-            audio_tensor = pb_utils.get_input_tensor_by_name(request, "audio")
-            if audio_tensor is None:
-                audio_tensor = pb_utils.get_input_tensor_by_name(request, "audio_signal")
+            audio = pb_utils.get_input_tensor_by_name(request, "audio")
+            audio = audio.as_numpy().flatten().astype(np.float32)
 
-            audio = audio_tensor.as_numpy().flatten().astype(np.float32)
-
-            # Normalize if needed (should be float32 in range [-1, 1])
-            if audio.max() > 1.0 or audio.min() < -1.0:
+            # Normalize to [-1, 1]
+            if np.abs(audio).max() > 1.0:
                 audio = audio / 32768.0
 
-            if self._use_sherpa and self.recognizer:
-                # Use sherpa-onnx for full transcription
-                stream = self.recognizer.create_stream()
-                stream.accept_waveform(16000, audio)
-                self.recognizer.decode_stream(stream)
-                text = stream.result.text.strip()
-            else:
-                # Fallback: raw ONNX inference (returns tokens, basic decoding)
-                text = self._infer_onnxruntime(audio)
+            # Transcribe
+            text = self._transcribe(audio)
 
-            # Create output tensor
-            output_tensor = pb_utils.Tensor(
-                "transcription",
-                np.array([text], dtype=object)
-            )
-            responses.append(pb_utils.InferenceResponse([output_tensor]))
+            output = pb_utils.Tensor("transcription", np.array([text], dtype=object))
+            responses.append(pb_utils.InferenceResponse([output]))
 
         return responses
 
-    def _infer_onnxruntime(self, audio):
-        """Run inference with raw onnxruntime and decode tokens."""
-        # Prepare inputs
-        audio = audio.reshape(1, -1)
-        length = np.array([[audio.shape[1]]], dtype=np.int64)
+    def _transcribe(self, audio):
+        """
+        Greedy transducer decoding.
 
-        # Run inference
-        inputs = {
-            "audio_signal": audio,
-            "length": length,
-        }
+        Transducer: P(y|x) via encoder-decoder-joiner architecture.
+        """
+        # Encoder: audio -> encoder_out
+        # Input shape: [batch, time] or [batch, features, time]
+        audio_input = audio.reshape(1, -1)
+        audio_len = np.array([[audio_input.shape[1]]], dtype=np.int64)
+
+        # Get encoder input names
+        enc_inputs = {inp.name: None for inp in self.encoder.get_inputs()}
+
+        if "audio_signal" in enc_inputs:
+            enc_inputs["audio_signal"] = audio_input
+        elif "input" in enc_inputs:
+            enc_inputs["input"] = audio_input
+        else:
+            # Use first input
+            enc_inputs[self.encoder.get_inputs()[0].name] = audio_input
+
+        # Add length if required
+        for inp in self.encoder.get_inputs():
+            if "length" in inp.name.lower() and inp.name not in enc_inputs:
+                enc_inputs[inp.name] = audio_len
+
+        # Remove None entries
+        enc_inputs = {k: v for k, v in enc_inputs.items() if v is not None}
 
         try:
-            outputs = self.session.run(None, inputs)
-            tokens = outputs[0].flatten()
-
-            # Decode tokens to text
-            text_parts = []
-            for token_id in tokens:
-                if token_id in self.vocab:
-                    token = self.vocab[token_id]
-                    if token and token not in ["<blank>", "<pad>", "<unk>", "<s>", "</s>"]:
-                        text_parts.append(token)
-
-            text = "".join(text_parts).replace("▁", " ").strip()
-            return text
-
+            encoder_out = self.encoder.run(None, enc_inputs)[0]
         except Exception as e:
-            pb_utils.Logger.log_error(f"Inference error: {e}")
+            pb_utils.Logger.log_error(f"Encoder error: {e}")
             return ""
+
+        # Greedy decode
+        tokens = self._greedy_decode(encoder_out)
+
+        # Convert to text
+        text = self._tokens_to_text(tokens)
+        return text
+
+    def _greedy_decode(self, encoder_out):
+        """
+        Greedy transducer decoding.
+
+        At each encoder frame:
+        1. Run decoder on current hypothesis
+        2. Run joiner on (encoder_out, decoder_out)
+        3. Take argmax of joiner output
+        4. If not blank, append to hypothesis and repeat
+        5. If blank, move to next encoder frame
+        """
+        batch_size, num_frames, enc_dim = encoder_out.shape
+
+        # Initialize decoder state with blank
+        tokens = []
+        decoder_input = np.array([[self.blank_id]], dtype=np.int64)
+
+        # Get decoder/joiner input names
+        dec_input_name = self.decoder.get_inputs()[0].name
+        join_enc_name = self.joiner.get_inputs()[0].name
+        join_dec_name = self.joiner.get_inputs()[1].name if len(self.joiner.get_inputs()) > 1 else None
+
+        for t in range(num_frames):
+            enc_frame = encoder_out[:, t:t+1, :]  # [1, 1, enc_dim]
+
+            # Limit iterations per frame to prevent infinite loops
+            for _ in range(10):
+                # Decoder
+                try:
+                    decoder_out = self.decoder.run(None, {dec_input_name: decoder_input})[0]
+                except Exception:
+                    break
+
+                # Joiner
+                try:
+                    if join_dec_name:
+                        joiner_out = self.joiner.run(None, {
+                            join_enc_name: enc_frame,
+                            join_dec_name: decoder_out,
+                        })[0]
+                    else:
+                        # Some joiners concatenate internally
+                        joiner_out = self.joiner.run(None, {join_enc_name: enc_frame})[0]
+                except Exception:
+                    break
+
+                # Argmax
+                logits = joiner_out.squeeze()
+                token_id = int(np.argmax(logits))
+
+                if token_id == self.blank_id:
+                    # Blank: move to next frame
+                    break
+                else:
+                    # Non-blank: emit token, update decoder input
+                    tokens.append(token_id)
+                    decoder_input = np.array([[token_id]], dtype=np.int64)
+
+        return tokens
+
+    def _tokens_to_text(self, tokens):
+        """Convert token IDs to text."""
+        pieces = []
+        for tid in tokens:
+            if tid in self.vocab:
+                token = self.vocab[tid]
+                # Skip special tokens
+                if token not in ["<blank>", "<unk>", "<s>", "</s>", "<pad>"]:
+                    pieces.append(token)
+
+        # Join and handle SentencePiece markers
+        text = "".join(pieces)
+        text = text.replace("▁", " ").strip()
+        return text
 
     def finalize(self):
         """Cleanup."""
