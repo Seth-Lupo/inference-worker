@@ -2,8 +2,8 @@
 # =============================================================================
 # Build Parakeet TDT 0.6B V2 for Triton (ASR Model)
 #
-# Downloads pre-converted ONNX models from sherpa-onnx releases,
-# builds TensorRT engines for GPU inference, and creates Triton model repository.
+# Downloads ONNX models from HuggingFace, builds TensorRT engines for GPU
+# inference, and creates Triton model repository.
 #
 # Usage:
 #   ./build_parakeet.sh [START_STAGE] [STOP_STAGE]
@@ -12,13 +12,11 @@
 #   ./build_parakeet.sh cleanup  # Clean up build artifacts
 #
 # Stages:
-#   0: Download ONNX models from sherpa-onnx
-#   1: Build TensorRT engines (encoder, decoder, joiner)
+#   0: Download ONNX models from HuggingFace
+#   1: Build TensorRT engines (encoder, decoder_joint)
 #   2: Create Triton model repository
 #
-# Sources:
-#   - https://github.com/k2-fsa/sherpa-onnx/releases
-#   - https://huggingface.co/nvidia/parakeet-tdt-0.6b-v2
+# Source: https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx
 # =============================================================================
 
 # Load shared utilities
@@ -29,8 +27,7 @@ source "${SCRIPT_DIR}/common.sh"
 # Configuration
 # =============================================================================
 readonly MODEL_NAME="parakeet_tdt"
-readonly SHERPA_VERSION="asr-models"
-readonly SHERPA_ARCHIVE="sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8.tar.bz2"
+readonly HF_REPO="istupakov/parakeet-tdt-0.6b-v2-onnx"
 
 # TRT build settings
 TRT_PRECISION="${TRT_PRECISION:-fp16}"
@@ -38,6 +35,7 @@ TRT_PRECISION="${TRT_PRECISION:-fp16}"
 # Paths
 readonly DEPLOY_DIR="$(get_deploy_dir)"
 readonly WORK_DIR="${DEPLOY_DIR}/parakeet_build"
+readonly ONNX_DIR="${WORK_DIR}/onnx"
 readonly MODEL_DIR="${DEPLOY_DIR}/model_repository/${MODEL_NAME}"
 readonly ENGINE_DIR="${MODEL_DIR}/1/engines"
 
@@ -83,56 +81,38 @@ echo "Stages: ${START_STAGE} to ${STOP_STAGE}"
 echo ""
 
 # =============================================================================
-# Stage 0: Download Models
+# Stage 0: Download Models from HuggingFace
 # =============================================================================
 
 stage_download_models() {
-    log_step "Stage 0: Downloading Parakeet from sherpa-onnx..."
+    log_step "Stage 0: Downloading Parakeet from HuggingFace..."
 
-    local url="https://github.com/k2-fsa/sherpa-onnx/releases/download/${SHERPA_VERSION}/${SHERPA_ARCHIVE}"
-    local archive="${WORK_DIR}/${SHERPA_ARCHIVE}"
+    mkdir -p "$ONNX_DIR"
 
-    mkdir -p "$WORK_DIR"
-
-    # Check if already extracted (files may be encoder.onnx or encoder.int8.onnx)
-    local extracted
-    extracted=$(find "$WORK_DIR" -maxdepth 1 -type d -name "sherpa-onnx-*parakeet*" 2>/dev/null | head -1)
-    if [[ -n "$extracted" ]] && ls "${extracted}"/encoder*.onnx &>/dev/null; then
-        log_info "Models already downloaded at: $extracted"
+    # Check if already downloaded (encoder is the large file)
+    if [[ -f "${ONNX_DIR}/encoder-model.onnx" ]] && is_real_file "${ONNX_DIR}/encoder-model.onnx.data" 1000000; then
+        log_info "Models already downloaded at: $ONNX_DIR"
         return 0
     fi
 
-    # Download if not exists
-    if [[ ! -f "$archive" ]]; then
-        log_info "Downloading ${SHERPA_ARCHIVE}..."
-        if ! curl -L -f -o "$archive" "$url"; then
-            log_error "Failed to download from: $url"
+    # Clone with LFS
+    log_info "Cloning ${HF_REPO}..."
+    hf_clone "$HF_REPO" "$ONNX_DIR" || {
+        log_error "Failed to clone from HuggingFace"
+        return 1
+    }
+
+    # Verify key files exist
+    local required_files=("encoder-model.onnx" "encoder-model.onnx.data" "decoder_joint-model.onnx" "vocab.txt")
+    for file in "${required_files[@]}"; do
+        if [[ ! -f "${ONNX_DIR}/${file}" ]]; then
+            log_error "Missing required file: ${file}"
+            ls -la "$ONNX_DIR"
             return 1
         fi
-    else
-        log_info "Archive already downloaded"
-    fi
+    done
 
-    # Verify it's a valid bzip2 file
-    if ! file "$archive" | grep -q "bzip2"; then
-        log_error "Downloaded file is not a valid bzip2 archive"
-        rm -f "$archive"
-        return 1
-    fi
-
-    # Extract
-    log_info "Extracting archive..."
-    (cd "$WORK_DIR" && tar -xjf "$SHERPA_ARCHIVE")
-
-    # Verify extraction (files may be encoder.onnx or encoder.int8.onnx)
-    extracted=$(find "$WORK_DIR" -maxdepth 1 -type d -name "sherpa-onnx-*parakeet*" | head -1)
-    if [[ -z "$extracted" ]] || ! ls "${extracted}"/encoder*.onnx &>/dev/null; then
-        log_error "Could not find extracted ONNX models"
-        ls -la "$WORK_DIR"
-        return 1
-    fi
-
-    log_info "Downloaded: $extracted"
+    log_info "Downloaded ONNX models to: $ONNX_DIR"
 }
 
 # =============================================================================
@@ -142,27 +122,11 @@ stage_download_models() {
 stage_build_trt_engines() {
     log_step "Stage 1: Building TensorRT engines..."
 
-    # Find ONNX models
-    local onnx_dir
-    onnx_dir=$(find "$WORK_DIR" -maxdepth 1 -type d -name "sherpa-onnx-*parakeet*" | head -1)
-    if [[ -z "$onnx_dir" ]]; then
+    # Verify ONNX models exist
+    if [[ ! -f "${ONNX_DIR}/encoder-model.onnx" ]]; then
         log_error "ONNX models not found. Run stage 0 first."
         return 1
     fi
-
-    # Find ONNX files (may be encoder.onnx or encoder.int8.onnx)
-    local encoder_onnx decoder_onnx joiner_onnx
-    encoder_onnx=$(ls "${onnx_dir}"/encoder*.onnx 2>/dev/null | head -1)
-    decoder_onnx=$(ls "${onnx_dir}"/decoder*.onnx 2>/dev/null | head -1)
-    joiner_onnx=$(ls "${onnx_dir}"/joiner*.onnx 2>/dev/null | head -1)
-
-    if [[ -z "$encoder_onnx" || -z "$decoder_onnx" || -z "$joiner_onnx" ]]; then
-        log_error "Missing ONNX files in: $onnx_dir"
-        ls -la "$onnx_dir"
-        return 1
-    fi
-
-    log_info "Found ONNX models: $(basename "$encoder_onnx"), $(basename "$decoder_onnx"), $(basename "$joiner_onnx")"
 
     mkdir -p "$ENGINE_DIR"
 
@@ -170,35 +134,26 @@ stage_build_trt_engines() {
     local precision_flag="--fp16"
     [[ "$TRT_PRECISION" == "fp32" ]] && precision_flag="--fp32"
 
-    # Build encoder (audio input: variable length)
+    # Build encoder (audio features input: batch x time x features)
+    # Parakeet encoder expects preprocessed mel features
     log_info "Building encoder engine..."
     build_trt_engine \
-        "$encoder_onnx" \
+        "${ONNX_DIR}/encoder-model.onnx" \
         "${ENGINE_DIR}/encoder.engine" \
         "$precision_flag" \
-        "--minShapes=x:1x1000" \
-        "--optShapes=x:1x160000" \
-        "--maxShapes=x:1x480000"
+        "--minShapes=audio_signal:1x128x10,length:1" \
+        "--optShapes=audio_signal:1x128x1000,length:1" \
+        "--maxShapes=audio_signal:1x128x3000,length:1"
 
-    # Build decoder (single token input)
-    log_info "Building decoder engine..."
+    # Build decoder_joint (combined decoder and joiner)
+    log_info "Building decoder_joint engine..."
     build_trt_engine \
-        "$decoder_onnx" \
-        "${ENGINE_DIR}/decoder.engine" \
+        "${ONNX_DIR}/decoder_joint-model.onnx" \
+        "${ENGINE_DIR}/decoder_joint.engine" \
         "$precision_flag" \
-        "--minShapes=y:1x1" \
-        "--optShapes=y:1x1" \
-        "--maxShapes=y:1x1"
-
-    # Build joiner (fixed size hidden states)
-    log_info "Building joiner engine..."
-    build_trt_engine \
-        "$joiner_onnx" \
-        "${ENGINE_DIR}/joiner.engine" \
-        "$precision_flag" \
-        "--minShapes=encoder_out:1x1x1024,decoder_out:1x1x512" \
-        "--optShapes=encoder_out:1x1x1024,decoder_out:1x1x512" \
-        "--maxShapes=encoder_out:1x1x1024,decoder_out:1x1x512"
+        "--minShapes=encoder_outputs:1x1x1024,targets:1x1,target_length:1" \
+        "--optShapes=encoder_outputs:1x500x1024,targets:1x1,target_length:1" \
+        "--maxShapes=encoder_outputs:1x3000x1024,targets:1x1,target_length:1"
 
     log_info "TRT engines built at: $ENGINE_DIR"
 }
@@ -210,41 +165,22 @@ stage_build_trt_engines() {
 stage_create_model_repo() {
     log_step "Stage 2: Creating Triton model repository..."
 
-    # Find ONNX source
-    local source_dir
-    source_dir=$(find "$WORK_DIR" -maxdepth 1 -type d -name "sherpa-onnx-*parakeet*" | head -1)
-    if [[ -z "$source_dir" ]]; then
+    if [[ ! -d "$ONNX_DIR" ]]; then
         log_error "ONNX models not found. Run stage 0 first."
         return 1
     fi
 
     mkdir -p "${MODEL_DIR}/1"
 
-    # Copy ONNX files (needed as fallback if TRT fails)
+    # Copy ONNX files (as fallback and for reference)
     log_info "Copying ONNX files..."
-    cp "${source_dir}"/*.onnx "${MODEL_DIR}/1/" 2>/dev/null || true
+    cp "${ONNX_DIR}/encoder-model.onnx" "${MODEL_DIR}/1/"
+    cp "${ONNX_DIR}/encoder-model.onnx.data" "${MODEL_DIR}/1/"
+    cp "${ONNX_DIR}/decoder_joint-model.onnx" "${MODEL_DIR}/1/"
 
-    # Copy tokens
-    cp "${source_dir}/tokens.txt" "${MODEL_DIR}/1/"
-
-    # Rename INT8 files to standard names if needed
-    local f
-    for f in "${MODEL_DIR}/1/"*.int8.onnx; do
-        if [[ -f "$f" ]]; then
-            local newname="${f%.int8.onnx}.onnx"
-            log_info "Renaming: $(basename "$f") -> $(basename "$newname")"
-            mv "$f" "$newname"
-        fi
-    done
-
-    # Verify required files
-    local required_files=("encoder.onnx" "decoder.onnx" "joiner.onnx" "tokens.txt")
-    for file in "${required_files[@]}"; do
-        if [[ ! -f "${MODEL_DIR}/1/${file}" ]]; then
-            log_error "Missing required file: ${file}"
-            return 1
-        fi
-    done
+    # Copy vocab and preprocessor
+    cp "${ONNX_DIR}/vocab.txt" "${MODEL_DIR}/1/"
+    [[ -f "${ONNX_DIR}/nemo128.onnx" ]] && cp "${ONNX_DIR}/nemo128.onnx" "${MODEL_DIR}/1/"
 
     log_info "Model files copied successfully"
 }
