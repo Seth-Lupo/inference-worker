@@ -59,7 +59,15 @@ echo ""
 echo "=== CosyVoice (TTS) ==="
 check "${COSY_BUILD}/CosyVoice2-0.5B/speech_tokenizer_v2.engine" 1000000 "speech_tokenizer_v2.engine (TRT)"
 check "${COSY_BUILD}/CosyVoice2-0.5B/campplus.engine" 1000000 "campplus.engine (TRT)"
-check_dir "${COSY_BUILD}/trtllm_engine" "trtllm_engine directory"
+# Check for TRT-LLM engine (could be trtllm_engine or trt_engines_*)
+COSY_ENGINE=$(find "${COSY_BUILD}" -maxdepth 1 -type d \( -name "trtllm_engine" -o -name "trt_engines*" \) 2>/dev/null | head -1)
+if [[ -n "$COSY_ENGINE" ]]; then
+    check_dir "$COSY_ENGINE" "trtllm engine: $(basename "$COSY_ENGINE")"
+    check "${COSY_ENGINE}/rank0.engine" 1000000 "  rank0.engine"
+else
+    echo -e "${RED}✗${NC} trtllm engine directory"
+    ((fail++))
+fi
 
 echo ""
 echo "=== CosyVoice Templates ==="
