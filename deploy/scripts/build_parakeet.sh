@@ -94,10 +94,10 @@ stage_download_models() {
 
     mkdir -p "$WORK_DIR"
 
-    # Check if already extracted
+    # Check if already extracted (files may be encoder.onnx or encoder.int8.onnx)
     local extracted
     extracted=$(find "$WORK_DIR" -maxdepth 1 -type d -name "sherpa-onnx-*parakeet*" 2>/dev/null | head -1)
-    if [[ -n "$extracted" && -f "${extracted}/encoder.onnx" ]]; then
+    if [[ -n "$extracted" ]] && ls "${extracted}"/encoder*.onnx &>/dev/null; then
         log_info "Models already downloaded at: $extracted"
         return 0
     fi
@@ -124,9 +124,9 @@ stage_download_models() {
     log_info "Extracting archive..."
     (cd "$WORK_DIR" && tar -xjf "$SHERPA_ARCHIVE")
 
-    # Verify extraction
+    # Verify extraction (files may be encoder.onnx or encoder.int8.onnx)
     extracted=$(find "$WORK_DIR" -maxdepth 1 -type d -name "sherpa-onnx-*parakeet*" | head -1)
-    if [[ -z "$extracted" || ! -f "${extracted}/encoder.onnx" ]]; then
+    if [[ -z "$extracted" ]] || ! ls "${extracted}"/encoder*.onnx &>/dev/null; then
         log_error "Could not find extracted ONNX models"
         ls -la "$WORK_DIR"
         return 1
@@ -150,6 +150,20 @@ stage_build_trt_engines() {
         return 1
     fi
 
+    # Find ONNX files (may be encoder.onnx or encoder.int8.onnx)
+    local encoder_onnx decoder_onnx joiner_onnx
+    encoder_onnx=$(ls "${onnx_dir}"/encoder*.onnx 2>/dev/null | head -1)
+    decoder_onnx=$(ls "${onnx_dir}"/decoder*.onnx 2>/dev/null | head -1)
+    joiner_onnx=$(ls "${onnx_dir}"/joiner*.onnx 2>/dev/null | head -1)
+
+    if [[ -z "$encoder_onnx" || -z "$decoder_onnx" || -z "$joiner_onnx" ]]; then
+        log_error "Missing ONNX files in: $onnx_dir"
+        ls -la "$onnx_dir"
+        return 1
+    fi
+
+    log_info "Found ONNX models: $(basename "$encoder_onnx"), $(basename "$decoder_onnx"), $(basename "$joiner_onnx")"
+
     mkdir -p "$ENGINE_DIR"
 
     # Determine precision flag
@@ -159,7 +173,7 @@ stage_build_trt_engines() {
     # Build encoder (audio input: variable length)
     log_info "Building encoder engine..."
     build_trt_engine \
-        "${onnx_dir}/encoder.onnx" \
+        "$encoder_onnx" \
         "${ENGINE_DIR}/encoder.engine" \
         "$precision_flag" \
         "--minShapes=x:1x1000" \
@@ -169,7 +183,7 @@ stage_build_trt_engines() {
     # Build decoder (single token input)
     log_info "Building decoder engine..."
     build_trt_engine \
-        "${onnx_dir}/decoder.onnx" \
+        "$decoder_onnx" \
         "${ENGINE_DIR}/decoder.engine" \
         "$precision_flag" \
         "--minShapes=y:1x1" \
@@ -179,7 +193,7 @@ stage_build_trt_engines() {
     # Build joiner (fixed size hidden states)
     log_info "Building joiner engine..."
     build_trt_engine \
-        "${onnx_dir}/joiner.onnx" \
+        "$joiner_onnx" \
         "${ENGINE_DIR}/joiner.engine" \
         "$precision_flag" \
         "--minShapes=encoder_out:1x1x1024,decoder_out:1x1x512" \
