@@ -19,36 +19,46 @@ RUN pip install --no-cache-dir --no-deps \
         torchaudio --index-url https://download.pytorch.org/whl/cu130
 
 # Install Python packages for Parakeet ASR and CosyVoice TTS
+# Split into groups to avoid dependency conflicts
+
+# Core packages (binary only to avoid build issues)
+RUN pip install --no-cache-dir --only-binary :all: \
+        numpy scipy pyyaml
+
+# ML frameworks
 RUN pip install --no-cache-dir \
-        # ASR (Parakeet)
-        sherpa-onnx \
-        onnx2torch \
-        # ONNX runtime with GPU
-        onnxruntime-gpu \
-        # Core ML
-        numpy \
-        scipy \
         transformers \
         sentencepiece \
         einops \
-        # CosyVoice config/model loading
+        pytorch-lightning==2.0.0 \
+        diffusers \
+        x-transformers \
+        conformer
+
+# Config/loading
+RUN pip install --no-cache-dir \
         hydra-core \
         omegaconf \
         hyperpyyaml \
-        pydantic \
-        # Audio processing
+        pydantic
+
+# Audio processing
+RUN pip install --no-cache-dir \
         librosa \
         soundfile \
         pyworld \
         phonemizer \
         inflect \
-        Unidecode \
-        # CosyVoice models
-        lightning \
-        conformer \
-        diffusers \
-        x-transformers \
-        # Audio tokenization
+        Unidecode
+
+# ASR (Parakeet)
+RUN pip install --no-cache-dir \
+        sherpa-onnx \
+        onnx2torch \
+        onnxruntime-gpu
+
+# Audio tokenization
+RUN pip install --no-cache-dir \
         s3tokenizer \
         onnx \
         openai-whisper \
