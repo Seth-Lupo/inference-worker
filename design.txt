@@ -21,3 +21,9 @@ ALL inference will be done of triton inference server. I will use silero vad vor
 All inference that uses GPU will be on triton. 
 
 Write code like steve jobs. Be modular. Use dependency injection. Note that we will be serving users concurrently, and latency matters.
+
+  --load-model=cosyvoice2
+      --load-model=audio_tokenizer
+      --load-model=speaker_embedding
+      --load-model=tensorrt_llm
+      --load-model=token2wav
