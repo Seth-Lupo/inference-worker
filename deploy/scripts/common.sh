@@ -247,8 +247,8 @@ require_gpu() {
 # TensorRT Engine Building
 # =============================================================================
 
-# Default container for TRT building (TensorRT image has trtexec, Triton doesn't)
-readonly TRT_BUILD_IMAGE="${TRT_BUILD_IMAGE:-nvcr.io/nvidia/tensorrt:24.12-py3}"
+# Default container for TRT building
+readonly TRT_BUILD_IMAGE="${TRT_BUILD_IMAGE:-nvcr.io/nvidia/tritonserver:25.12-trtllm-python-py3}"
 
 # Build TensorRT engine from ONNX model
 # Usage: build_trt_engine <onnx_path> <engine_path> [--fp16] [--int8] [--workspace=MB] [--min-shapes=...] [--opt-shapes=...] [--max-shapes=...]
@@ -303,8 +303,8 @@ build_trt_engine() {
     local engine_dir
     engine_dir=$(cd "$(dirname "$engine_path")" && pwd)
 
-    # Build trtexec command
-    local trtexec_cmd="trtexec --onnx=/onnx/${onnx_name} --saveEngine=/engine/${engine_name}"
+    # Build trtexec command (use full path for TRT-LLM container)
+    local trtexec_cmd="/usr/src/tensorrt/bin/trtexec --onnx=/onnx/${onnx_name} --saveEngine=/engine/${engine_name}"
     [[ -n "$precision" ]] && trtexec_cmd+=" $precision"
     trtexec_cmd+=" --workspace=${workspace}"
 
