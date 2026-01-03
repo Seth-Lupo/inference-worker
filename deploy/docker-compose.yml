@@ -6,11 +6,8 @@ services:
   # Models: qwen3_8b, parakeet_tdt, cosyvoice2 (7 submodels)
   # =============================================================================
   triton:
-    # Custom Triton image with TensorRT-LLM + Python backends
-    build:
-      context: .
-      dockerfile: Dockerfile.triton
-    image: voice-agent-triton:latest
+    # Triton with TensorRT-LLM backend
+    image: nvcr.io/nvidia/tritonserver:25.12-trtllm-python-py3
     container_name: voice-agent-triton
     restart: unless-stopped
 
