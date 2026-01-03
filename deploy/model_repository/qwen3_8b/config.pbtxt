@@ -117,4 +117,9 @@ parameters {
   value: { string_value: "" }
 }
 
+parameters {
+  key: "guided_decoding_backend"
+  value: { string_value: "" }
+}
+
 version_policy: { latest: { num_versions: 1 } }
