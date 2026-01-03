@@ -146,14 +146,12 @@ stage_build_trt_engines() {
         "--maxShapes=audio_signal:1x128x3000,length:1"
 
     # Build decoder_joint (combined decoder and joiner)
+    # Note: decoder_joint has mostly fixed shapes for autoregressive decoding
     log_info "Building decoder_joint engine..."
     build_trt_engine \
         "${ONNX_DIR}/decoder_joint-model.onnx" \
         "${ENGINE_DIR}/decoder_joint.engine" \
-        "$precision_flag" \
-        "--minShapes=encoder_outputs:1x1x1024,targets:1x1,target_length:1" \
-        "--optShapes=encoder_outputs:1x500x1024,targets:1x1,target_length:1" \
-        "--maxShapes=encoder_outputs:1x3000x1024,targets:1x1,target_length:1"
+        "$precision_flag"
 
     log_info "TRT engines built at: $ENGINE_DIR"
 }
