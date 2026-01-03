@@ -42,11 +42,11 @@ output [
 parameters [
   {
     key: "model_dir"
-    value: {string_value: "/cosyvoice_build/CosyVoice2-0.5B"}
+    value: {string_value: "/models/tts/assets"}
   },
   {
     key: "llm_tokenizer_dir"
-    value: {string_value: "/cosyvoice_build/cosyvoice2_llm"}
+    value: {string_value: "/models/tts/assets/cosyvoice2_llm"}
   }
 ]
 

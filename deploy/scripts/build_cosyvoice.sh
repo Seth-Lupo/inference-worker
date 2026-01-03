@@ -56,11 +56,11 @@ DECOUPLED_MODE="${DECOUPLED_MODE:-True}"
 # Paths
 readonly DEPLOY_DIR="$(get_deploy_dir)"
 readonly WORK_DIR="${DEPLOY_DIR}/cosyvoice_build"
-readonly MODEL_REPO="${DEPLOY_DIR}/model_repository/cosyvoice2_full"
+readonly MODEL_REPO="${DEPLOY_DIR}/model_repository/tts"
 
 # Local CosyVoice source (no external cloning needed)
 readonly COSYVOICE_SRC="${DEPLOY_DIR}/../src/cosyvoice"
-readonly COSYVOICE_TEMPLATES="${DEPLOY_DIR}/model_repository/cosyvoice_templates"
+readonly COSYVOICE_TEMPLATES="${DEPLOY_DIR}/model_repository/tts"
 readonly COSYVOICE_SCRIPTS="${DEPLOY_DIR}/scripts/cosyvoice"
 
 # =============================================================================
@@ -303,31 +303,17 @@ stage_build_onnx_trt() {
 # Stage 3: Create Model Repository
 # =============================================================================
 stage_create_model_repo() {
-    log_step "Stage 3: Creating Triton model repository..."
+    log_step "Stage 3: Setting up Triton model repository..."
 
-    if [[ ! -d "$COSYVOICE_TEMPLATES" ]]; then
-        log_error "CosyVoice templates not found at: $COSYVOICE_TEMPLATES"
+    if [[ ! -d "$MODEL_REPO" ]]; then
+        log_error "Model repository not found at: $MODEL_REPO"
         return 1
     fi
 
-    # Clean and create model repo
-    rm -rf "$MODEL_REPO"
-    mkdir -p "$MODEL_REPO"
-
-    # Copy model templates (all 7 models)
-    log_info "Copying model templates..."
-    cp -r "${COSYVOICE_TEMPLATES}/cosyvoice2" "$MODEL_REPO/"
-    cp -r "${COSYVOICE_TEMPLATES}/cosyvoice2_dit" "$MODEL_REPO/"
-    cp -r "${COSYVOICE_TEMPLATES}/tensorrt_llm" "$MODEL_REPO/"
-    cp -r "${COSYVOICE_TEMPLATES}/token2wav" "$MODEL_REPO/"
-    cp -r "${COSYVOICE_TEMPLATES}/token2wav_dit" "$MODEL_REPO/"
-    cp -r "${COSYVOICE_TEMPLATES}/audio_tokenizer" "$MODEL_REPO/"
-    cp -r "${COSYVOICE_TEMPLATES}/speaker_embedding" "$MODEL_REPO/"
-
-    # Configuration paths (relative to /models/cosyvoice2_full in container)
-    local engine_path="/models/cosyvoice2_full/tensorrt_llm/1/engine"
-    local model_dir="/models/cosyvoice2_full/assets"
-    local llm_tokenizer_dir="/models/cosyvoice2_full/assets/cosyvoice2_llm"
+    # Configuration paths (relative to /models/tts in container)
+    local engine_path="/models/tts/tensorrt_llm/1/engine"
+    local model_dir="/models/tts/assets"
+    local llm_tokenizer_dir="/models/tts/assets/cosyvoice2_llm"
 
     # Fill templates
     log_info "Filling config templates..."

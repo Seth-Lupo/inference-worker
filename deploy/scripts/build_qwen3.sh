@@ -36,7 +36,7 @@ KV_CACHE_FREE_GPU_MEM_FRACTION="${KV_CACHE_FREE_GPU_MEM_FRACTION:-0.5}"
 # Paths
 readonly DEPLOY_DIR="$(get_deploy_dir)"
 readonly WORK_DIR="${DEPLOY_DIR}/qwen3_build"
-readonly MODEL_REPO="${DEPLOY_DIR}/model_repository/qwen3_8b"
+readonly MODEL_REPO="${DEPLOY_DIR}/model_repository/llm/qwen3_8b"
 
 # =============================================================================
 # Load environment and parse args
@@ -367,12 +367,12 @@ parameters {
 
 parameters {
   key: "gpt_model_path"
-  value: { string_value: "/models/qwen3_8b/1/engine" }
+  value: { string_value: "/models/llm/qwen3_8b/1/engine" }
 }
 
 parameters {
   key: "tokenizer_dir"
-  value: { string_value: "/models/qwen3_8b/1/tokenizer" }
+  value: { string_value: "/models/llm/qwen3_8b/1/tokenizer" }
 }
 
 parameters {
@@ -383,6 +383,16 @@ parameters {
 parameters {
   key: "kv_cache_free_gpu_mem_fraction"
   value: { string_value: "${KV_CACHE_FREE_GPU_MEM_FRACTION}" }
+}
+
+parameters {
+  key: "xgrammar_tokenizer_info_path"
+  value: { string_value: "" }
+}
+
+parameters {
+  key: "guided_decoding_backend"
+  value: { string_value: "" }
 }
 
 version_policy: { latest: { num_versions: 1 } }

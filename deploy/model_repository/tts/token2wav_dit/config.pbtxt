@@ -37,7 +37,7 @@ output [
 parameters [
   {
     key: "model_dir"
-    value: {string_value: "/cosyvoice_build/CosyVoice2-0.5B"}
+    value: {string_value: "/models/tts/assets"}
   }
 ]
 

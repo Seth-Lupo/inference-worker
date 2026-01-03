@@ -248,7 +248,7 @@ require_gpu() {
 # =============================================================================
 
 # Default container for TRT building (TensorRT image has trtexec, Triton doesn't)
-readonly TRT_BUILD_IMAGE="${TRT_BUILD_IMAGE:-nvcr.io/nvidia/tensorrt:25.12-py3}"
+readonly TRT_BUILD_IMAGE="${TRT_BUILD_IMAGE:-nvcr.io/nvidia/tensorrt:25.09-py3}"
 
 # Build TensorRT engine from ONNX model
 # Usage: build_trt_engine <onnx_path> <engine_path> [--fp16] [--int8] [--memPoolSize=MB] [--min-shapes=...] [--opt-shapes=...] [--max-shapes=...]

@@ -94,12 +94,12 @@ parameters {
 
 parameters {
   key: "gpt_model_path"
-  value: { string_value: "/models/qwen3_8b/1/engine" }
+  value: { string_value: "/models/llm/qwen3_8b/1/engine" }
 }
 
 parameters {
   key: "tokenizer_dir"
-  value: { string_value: "/models/qwen3_8b/1/tokenizer" }
+  value: { string_value: "/models/llm/qwen3_8b/1/tokenizer" }
 }
 
 parameters {

@@ -91,7 +91,7 @@ output [
 instance_group [
   {
     count: 1
-    kind: KIND_CPU
+    kind: KIND_GPU
   }
 ]
 
@@ -101,7 +101,7 @@ parameters: {
 }
 parameters: {
   key: "gpt_model_path"
-  value: { string_value: "/cosyvoice_build/trt_engines_bfloat16" }
+  value: { string_value: "/models/tts/tensorrt_llm/1/engine" }
 }
 parameters: {
   key: "max_beam_width"
@@ -137,7 +137,7 @@ parameters: {
 }
 parameters: {
   key: "tokenizer_dir"
-  value: { string_value: "/cosyvoice_build/cosyvoice2_llm" }
+  value: { string_value: "/models/tts/assets/cosyvoice2_llm" }
 }
 parameters: {
   key: "xgrammar_tokenizer_info_path"
