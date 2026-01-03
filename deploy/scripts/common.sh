@@ -301,24 +301,37 @@ build_trt_engine() {
     local engine_name
     engine_name=$(basename "$engine_path")
     local engine_dir
-    engine_dir=$(cd "$(dirname "$engine_path")" && pwd)
+    engine_dir="$(dirname "$engine_path")"
+    mkdir -p "$engine_dir"
+    engine_dir=$(cd "$engine_dir" && pwd)
 
-    # Build trtexec command
-    local trtexec_cmd="trtexec --onnx=/onnx/${onnx_name} --saveEngine=/engine/${engine_name}"
-    [[ -n "$precision" ]] && trtexec_cmd+=" $precision"
-    trtexec_cmd+=" --workspace=${workspace}"
+    # Build trtexec arguments
+    local trtexec_args="--onnx=/onnx/${onnx_name} --saveEngine=/engine/${engine_name}"
+    [[ -n "$precision" ]] && trtexec_args+=" $precision"
+    trtexec_args+=" --workspace=${workspace}"
 
     for arg in "${shapes_args[@]}"; do
-        trtexec_cmd+=" $arg"
+        trtexec_args+=" $arg"
     done
 
-    # Run in container
+    log_info "Running trtexec in container: $TRT_BUILD_IMAGE"
+
+    # Run in container - try trtexec from PATH first, then common locations
     docker run --rm --gpus all \
         --shm-size=4g \
         -v "${onnx_dir}:/onnx:ro" \
         -v "${engine_dir}:/engine" \
         "$TRT_BUILD_IMAGE" \
-        bash -c "$trtexec_cmd" || {
+        bash -c "
+            if command -v trtexec &>/dev/null; then
+                trtexec ${trtexec_args}
+            elif [[ -x /usr/src/tensorrt/bin/trtexec ]]; then
+                /usr/src/tensorrt/bin/trtexec ${trtexec_args}
+            else
+                echo 'ERROR: trtexec not found in container'
+                exit 1
+            fi
+        " || {
             log_error "trtexec failed for $(basename "$onnx_path")"
             return 1
         }
