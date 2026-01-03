@@ -1,0 +1,58 @@
+name: "cosyvoice2"
+backend: "python"
+max_batch_size: 1
+
+model_transaction_policy {
+  decoupled: True
+}
+
+input [
+  {
+    name: "reference_wav"
+    data_type: TYPE_FP32
+    dims: [-1]
+    optional: true
+  },
+  {
+    name: "reference_wav_len"
+    data_type: TYPE_INT32
+    dims: [1]
+    optional: true
+  },
+  {
+    name: "reference_text"
+    data_type: TYPE_STRING
+    dims: [1]
+    optional: true
+  },
+  {
+    name: "target_text"
+    data_type: TYPE_STRING
+    dims: [1]
+  }
+]
+output [
+  {
+    name: "waveform"
+    data_type: TYPE_FP32
+    dims: [-1]
+  }
+]
+
+parameters [
+  {
+    key: "model_dir"
+    value: {string_value: "/cosyvoice_build/CosyVoice2-0.5B"}
+  },
+  {
+    key: "llm_tokenizer_dir"
+    value: {string_value: "/cosyvoice_build/CosyVoice2-0.5B"}
+  }
+]
+
+instance_group [
+  {
+    count: 1
+    kind: KIND_GPU
+  }
+]

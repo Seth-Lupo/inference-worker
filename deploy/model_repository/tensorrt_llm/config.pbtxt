@@ -1,0 +1,137 @@
+name: "tensorrt_llm"
+backend: "tensorrtllm"
+max_batch_size: 1
+
+model_transaction_policy {
+  decoupled: True
+}
+
+input [
+  {
+    name: "input_ids"
+    data_type: TYPE_INT32
+    dims: [-1]
+    allow_ragged_batch: true
+  },
+  {
+    name: "input_lengths"
+    data_type: TYPE_INT32
+    dims: [1]
+    reshape: { shape: [] }
+  },
+  {
+    name: "request_output_len"
+    data_type: TYPE_INT32
+    dims: [1]
+    reshape: { shape: [] }
+  },
+  {
+    name: "end_id"
+    data_type: TYPE_INT32
+    dims: [1]
+    reshape: { shape: [] }
+    optional: true
+  },
+  {
+    name: "pad_id"
+    data_type: TYPE_INT32
+    dims: [1]
+    reshape: { shape: [] }
+    optional: true
+  },
+  {
+    name: "temperature"
+    data_type: TYPE_FP32
+    dims: [1]
+    reshape: { shape: [] }
+    optional: true
+  },
+  {
+    name: "runtime_top_k"
+    data_type: TYPE_INT32
+    dims: [1]
+    reshape: { shape: [] }
+    optional: true
+  },
+  {
+    name: "runtime_top_p"
+    data_type: TYPE_FP32
+    dims: [1]
+    reshape: { shape: [] }
+    optional: true
+  },
+  {
+    name: "streaming"
+    data_type: TYPE_BOOL
+    dims: [1]
+    reshape: { shape: [] }
+    optional: true
+  },
+  {
+    name: "stop"
+    data_type: TYPE_BOOL
+    dims: [1]
+    reshape: { shape: [] }
+    optional: true
+  }
+]
+output [
+  {
+    name: "output_ids"
+    data_type: TYPE_INT32
+    dims: [-1, -1]
+  },
+  {
+    name: "sequence_length"
+    data_type: TYPE_INT32
+    dims: [-1]
+  }
+]
+
+instance_group [
+  {
+    count: 1
+    kind: KIND_CPU
+  }
+]
+
+parameters: {
+  key: "gpt_model_type"
+  value: { string_value: "inflight_fused_batching" }
+}
+parameters: {
+  key: "gpt_model_path"
+  value: { string_value: "/cosyvoice_build/trt_engines_bfloat16" }
+}
+parameters: {
+  key: "max_beam_width"
+  value: { string_value: "1" }
+}
+parameters: {
+  key: "batch_scheduler_policy"
+  value: { string_value: "max_utilization" }
+}
+parameters: {
+  key: "kv_cache_free_gpu_mem_fraction"
+  value: { string_value: "0.5" }
+}
+parameters: {
+  key: "exclude_input_in_output"
+  value: { string_value: "true" }
+}
+parameters: {
+  key: "enable_kv_cache_reuse"
+  value: { string_value: "false" }
+}
+parameters: {
+  key: "enable_chunked_context"
+  value: { string_value: "false" }
+}
+parameters: {
+  key: "decoding_mode"
+  value: { string_value: "top_k_top_p" }
+}
+parameters: {
+  key: "executor_worker_path"
+  value: { string_value: "/opt/tritonserver/backends/tensorrtllm/trtllmExecutorWorker" }
+}
