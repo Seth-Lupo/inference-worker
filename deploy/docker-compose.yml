@@ -7,7 +7,9 @@ services:
   # =============================================================================
   triton:
     # Triton with TensorRT-LLM backend
-    image: nvcr.io/nvidia/tritonserver:25.12-trtllm-python-py3
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.triton
     container_name: voice-agent-triton
     restart: unless-stopped
 
