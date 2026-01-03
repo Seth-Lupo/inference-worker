@@ -251,8 +251,8 @@ require_gpu() {
 readonly TRT_BUILD_IMAGE="${TRT_BUILD_IMAGE:-nvcr.io/nvidia/tensorrt:25.12-py3}"
 
 # Build TensorRT engine from ONNX model
-# Usage: build_trt_engine <onnx_path> <engine_path> [--fp16] [--int8] [--workspace=MB] [--min-shapes=...] [--opt-shapes=...] [--max-shapes=...]
-# Example: build_trt_engine model.onnx model.engine --fp16 --workspace=4096
+# Usage: build_trt_engine <onnx_path> <engine_path> [--fp16] [--int8] [--memPoolSize=MB] [--min-shapes=...] [--opt-shapes=...] [--max-shapes=...]
+# Example: build_trt_engine model.onnx model.engine --fp16 --memPoolSize=4096
 build_trt_engine() {
     local onnx_path="$1"
     local engine_path="$2"
@@ -260,7 +260,7 @@ build_trt_engine() {
 
     # Parse options
     local precision="--fp16"
-    local workspace="4096"
+    local mem_pool_size="4096"  # MiB
     local shapes_args=()
 
     while [[ $# -gt 0 ]]; do
@@ -268,7 +268,8 @@ build_trt_engine() {
             --fp16) precision="--fp16"; shift ;;
             --fp32) precision=""; shift ;;
             --int8) precision="--int8"; shift ;;
-            --workspace=*) workspace="${1#*=}"; shift ;;
+            --memPoolSize=*) mem_pool_size="${1#*=}"; shift ;;
+            --workspace=*) mem_pool_size="${1#*=}"; shift ;;  # Legacy support
             --minShapes=*|--optShapes=*|--maxShapes=*)
                 shapes_args+=("$1"); shift ;;
             *) shift ;;
@@ -303,10 +304,10 @@ build_trt_engine() {
     local engine_dir
     engine_dir=$(cd "$(dirname "$engine_path")" && pwd)
 
-    # Build trtexec command
+    # Build trtexec command (TRT 25.x uses --memPoolSize instead of deprecated --workspace)
     local trtexec_cmd="trtexec --onnx=/onnx/${onnx_name} --saveEngine=/engine/${engine_name}"
     [[ -n "$precision" ]] && trtexec_cmd+=" $precision"
-    trtexec_cmd+=" --workspace=${workspace}"
+    trtexec_cmd+=" --memPoolSize=workspace:${mem_pool_size}MiB"
 
     for arg in "${shapes_args[@]}"; do
         trtexec_cmd+=" $arg"
