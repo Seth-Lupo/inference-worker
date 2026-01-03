@@ -36,7 +36,7 @@ TRT_PRECISION="${TRT_PRECISION:-fp16}"
 readonly DEPLOY_DIR="$(get_deploy_dir)"
 readonly WORK_DIR="${DEPLOY_DIR}/parakeet_build"
 readonly ONNX_DIR="${WORK_DIR}/onnx"
-readonly MODEL_DIR="${DEPLOY_DIR}/model_repository/${MODEL_NAME}"
+readonly MODEL_DIR="${DEPLOY_DIR}/model_repository/asr/${MODEL_NAME}"
 readonly ENGINE_DIR="${MODEL_DIR}/1/engines"
 
 # =============================================================================
