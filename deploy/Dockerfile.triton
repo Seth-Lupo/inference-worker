@@ -23,14 +23,12 @@ RUN TORCH_VERSION=$(pip show torch | grep Version | cut -d' ' -f2) && \
 # Install grpcio binary
 RUN pip install --no-cache-dir --only-binary :all: grpcio grpcio-tools
 
-# All remaining installs use constraints to lock torch versions
+# Install all dependencies (without pytorch-lightning and openai-whisper which conflict)
 RUN pip install --no-cache-dir -c /tmp/constraints.txt \
-        numpy scipy pyyaml \
         "transformers>=4.40.0" \
         sentencepiece einops \
-        pytorch-lightning==2.0.0 \
         diffusers x-transformers conformer \
         hydra-core omegaconf hyperpyyaml pydantic \
         librosa soundfile pyworld phonemizer inflect Unidecode \
         sherpa-onnx onnx2torch onnxruntime-gpu \
-        s3tokenizer onnx openai-whisper wget gdown
+        s3tokenizer onnx wget gdown
