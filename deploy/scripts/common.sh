@@ -307,7 +307,8 @@ build_trt_engine() {
     # Build trtexec command (TRT 25.x uses --memPoolSize instead of deprecated --workspace)
     local trtexec_cmd="trtexec --onnx=/onnx/${onnx_name} --saveEngine=/engine/${engine_name}"
     [[ -n "$precision" ]] && trtexec_cmd+=" $precision"
-    trtexec_cmd+=" --memPoolSize=workspace:${mem_pool_size}MiB"
+    # Use deprecated --workspace flag which is more reliable for setting workspace size in MiB
+    trtexec_cmd+=" --workspace=${mem_pool_size}"
 
     for arg in "${shapes_args[@]}"; do
         trtexec_cmd+=" $arg"

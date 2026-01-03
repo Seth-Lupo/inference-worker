@@ -304,7 +304,7 @@ stage_build_onnx_trt() {
         "${modelscope_dir}/flow.decoder.estimator.fp32.onnx" \
         "${modelscope_dir}/flow.decoder.estimator.fp16.engine" \
         --fp16 \
-        "--memPoolSize=8192" \
+        "--workspace=8192" \
         "--minShapes=x:2x80x4,mask:2x1x4,mu:2x80x4,cond:2x80x4" \
         "--optShapes=x:2x80x500,mask:2x1x500,mu:2x80x500,cond:2x80x500" \
         "--maxShapes=x:2x80x3000,mask:2x1x3000,mu:2x80x3000,cond:2x80x3000"
