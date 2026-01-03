@@ -161,7 +161,7 @@ class CosyVoice2:
         if load_jit:
             self.model.load_jit('{}/flow.encoder.{}.zip'.format(model_dir, 'fp16' if self.fp16 is True else 'fp32'))
         if load_trt:
-            self.model.load_trt('{}/flow.decoder.estimator.{}.mygpu.plan'.format(model_dir, 'fp16' if self.fp16 is True else 'fp32'),
+            self.model.load_trt('{}/flow.decoder.estimator.{}.engine'.format(model_dir, 'fp16' if self.fp16 is True else 'fp32'),
                                 '{}/flow.decoder.estimator.fp32.onnx'.format(model_dir),
                                 trt_concurrent,
                                 self.fp16)
@@ -200,15 +200,15 @@ class CosyVoice2Model:
         self.hift.load_state_dict(hift_state_dict, strict=True)
         self.hift.to(self.device).eval()
 
-    def load_trt(self, flow_decoder_estimator_model, flow_decoder_onnx_model, trt_concurrent, fp16):
+    def load_trt(self, flow_decoder_estimator_engine, flow_decoder_onnx_model, trt_concurrent, fp16):
         assert torch.cuda.is_available(), 'tensorrt only supports gpu!'
-        if not os.path.exists(flow_decoder_estimator_model) or os.path.getsize(flow_decoder_estimator_model) == 0:
-            convert_onnx_to_trt(flow_decoder_estimator_model, self.get_trt_kwargs(), flow_decoder_onnx_model, fp16)
+        if not os.path.exists(flow_decoder_estimator_engine) or os.path.getsize(flow_decoder_estimator_engine) == 0:
+            convert_onnx_to_trt(flow_decoder_estimator_engine, self.get_trt_kwargs(), flow_decoder_onnx_model, fp16)
         del self.flow.decoder.estimator
         import tensorrt as trt
-        with open(flow_decoder_estimator_model, 'rb') as f:
+        with open(flow_decoder_estimator_engine, 'rb') as f:
             estimator_engine = trt.Runtime(trt.Logger(trt.Logger.INFO)).deserialize_cuda_engine(f.read())
-        assert estimator_engine is not None, 'failed to load trt {}'.format(flow_decoder_estimator_model)
+        assert estimator_engine is not None, 'failed to load trt {}'.format(flow_decoder_estimator_engine)
         self.flow.decoder.estimator = TrtContextWrapper(estimator_engine, trt_concurrent=trt_concurrent, device=self.device)
 
     def get_trt_kwargs(self):
