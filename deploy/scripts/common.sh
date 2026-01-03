@@ -81,7 +81,7 @@ has_real_weights() {
 # Ensure git-lfs is installed
 ensure_git_lfs() {
     if command -v git-lfs &>/dev/null; then
-        git lfs install --skip-smudge 2>/dev/null || true
+        git lfs install 2>/dev/null || true
         return 0
     fi
 

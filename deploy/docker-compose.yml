@@ -3,9 +3,10 @@ version: "3.8"
 services:
   # =============================================================================
   # Triton Inference Server with TensorRT-LLM Backend
+  # Models: qwen3_8b, parakeet_tdt, cosyvoice2 (7 submodels)
   # =============================================================================
   triton:
-    # Custom Triton image with TensorRT-LLM + Python backends + sherpa-onnx
+    # Custom Triton image with TensorRT-LLM + Python backends
     build:
       context: .
       dockerfile: Dockerfile.triton
@@ -39,10 +40,12 @@ services:
       - ./model_repository:/models:rw
       # Mount built Qwen3 TensorRT-LLM engine
       - ./qwen3_build/engine_int4:/models/qwen3_8b/1/engine:ro
-      # Mount CosyVoice2 full model repo (5 models with Python backends)
+      # Mount CosyVoice2 full model repo (7 models with Python backends)
       # Built by: ./scripts/build_cosyvoice.sh -1 2
       # Note: rw needed for TensorRT engine caching
       - ./model_repository/cosyvoice2_full:/models/cosyvoice2_full:rw
+      # Mount CosyVoice source for model classes (cosyvoice.llm, cosyvoice.flow, etc.)
+      - ./cosyvoice_build/CosyVoice:/opt/CosyVoice:ro
       # Engine cache
       - ./engine_cache:/engine_cache
       # Logs
@@ -51,6 +54,7 @@ services:
     environment:
       - CUDA_VISIBLE_DEVICES=0
       - TRT_LOGGER_LEVEL=WARNING
+      - PYTHONPATH=/opt/CosyVoice
 
     command: >
       tritonserver

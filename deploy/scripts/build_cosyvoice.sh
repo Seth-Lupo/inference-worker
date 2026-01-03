@@ -3,22 +3,33 @@
 # Build CosyVoice 2 TensorRT-LLM Engines (TTS Model)
 #
 # Downloads CosyVoice2-0.5B from HuggingFace/ModelScope, builds TRT engines,
-# and creates Triton model repository with 5 models.
+# and creates Triton model repository with 7 models:
+#   - cosyvoice2, cosyvoice2_dit (BLS orchestrators)
+#   - tensorrt_llm (TRT-LLM engine)
+#   - token2wav, token2wav_dit (vocoders)
+#   - audio_tokenizer, speaker_embedding (audio processing)
 #
 # Usage:
 #   ./build_cosyvoice.sh [START_STAGE] [STOP_STAGE]
 #   ./build_cosyvoice.sh -1 2      # Run all stages
-#   ./build_cosyvoice.sh 1 1       # Only build TRT engines
+#   ./build_cosyvoice.sh 0 2       # Download + build (skip clone if exists)
+#   ./build_cosyvoice.sh 2 2       # Only rebuild model repository
 #   ./build_cosyvoice.sh cleanup   # Clean up build artifacts
 #
 # Stages:
-#   -1: Clone CosyVoice repository
+#   -1: Clone CosyVoice repository (always re-clones)
 #    0: Download models from HuggingFace/ModelScope
-#    1: Build TensorRT engines
+#    1: Build TensorRT-LLM engines
 #    2: Create Triton model repository
 #
+# Environment Variables:
+#   COSYVOICE_REPO    - Git repo URL (default: github.com/Seth-Lupo/CosyVoice)
+#   HF_TOKEN          - HuggingFace token for gated models
+#   TRT_DTYPE         - TensorRT dtype: bfloat16, float16 (default: bfloat16)
+#   TRITON_MAX_BATCH_SIZE - Max batch size (default: 16)
+#
 # Sources:
-#   - https://github.com/FunAudioLLM/CosyVoice
+#   - https://github.com/Seth-Lupo/CosyVoice (fork with GPU configs)
 #   - https://huggingface.co/yuekai/cosyvoice2_llm
 #   - https://modelscope.cn/models/iic/CosyVoice2-0.5B
 # =============================================================================
@@ -88,7 +99,7 @@ fi
 
 # Parse stages
 START_STAGE="${1:-0}"
-STOP_STAGE="${2:-3}"
+STOP_STAGE="${2:-2}"
 
 echo "=============================================="
 echo "Building CosyVoice 2 TensorRT-LLM"
@@ -166,9 +177,14 @@ stage_download_models() {
         elif command -v git &>/dev/null; then
             log_info "Using git clone from ModelScope..."
             ensure_git_lfs
-            git clone --depth 1 "https://www.modelscope.cn/${MODELSCOPE_MODEL}.git" "$modelscope_dir" || {
+            GIT_LFS_SKIP_SMUDGE=0 git clone --depth 1 "https://www.modelscope.cn/${MODELSCOPE_MODEL}.git" "$modelscope_dir" || {
                 log_warn "ModelScope git clone failed"
             }
+            # Ensure LFS files are pulled
+            if [[ -d "$modelscope_dir/.git" ]]; then
+                log_info "Pulling LFS files..."
+                (cd "$modelscope_dir" && git lfs pull)
+            fi
         fi
 
         if ! is_real_file "${modelscope_dir}/flow.pt"; then
@@ -222,7 +238,7 @@ stage_build_engines() {
         -v "${WORK_DIR}:/workspace/build" \
         -v "${WORK_DIR}/CosyVoice:/workspace/CosyVoice" \
         -w /workspace/build \
-        -e PYTHONPATH=/workspace/CosyVoice:/workspace/CosyVoice/third_party/Matcha-TTS \
+        -e PYTHONPATH=/workspace/CosyVoice \
         "$TRTLLM_IMAGE" \
         bash -c "
             set -e

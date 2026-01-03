@@ -18,9 +18,8 @@ RUN pip install --no-cache-dir \
         torch torchaudio --index-url https://download.pytorch.org/whl/cu130
 
 # Install Python packages for Parakeet ASR and CosyVoice TTS
-# Based on CosyVoice requirements.txt + Matcha-TTS requirements.txt
 RUN pip install --no-cache-dir \
-        # ASR (Parakeet) - using PyTorch+CUDA via onnx2torch
+        # ASR (Parakeet) - ONNX to PyTorch conversion
         onnx2torch \
         # Core ML
         numpy \
@@ -28,35 +27,34 @@ RUN pip install --no-cache-dir \
         transformers \
         sentencepiece \
         einops \
-        # CosyVoice/Matcha-TTS config
+        # CosyVoice config/model loading
         hydra-core \
         omegaconf \
         hyperpyyaml \
         pydantic \
-        # CosyVoice/Matcha-TTS audio processing
+        # Audio processing
         librosa \
         soundfile \
         pyworld \
         phonemizer \
         inflect \
         Unidecode \
-        # CosyVoice/Matcha-TTS models
+        # CosyVoice models
         lightning \
         conformer \
         diffusers \
         x-transformers \
-        # Utilities
+        # Audio tokenization
         s3tokenizer \
         onnx \
         openai-whisper \
         wget \
         gdown
 
-# CosyVoice is mounted at runtime via docker-compose (no clone needed)
-# PYTHONPATH is set in docker-compose.yml environment
-
-# Note: onnxruntime-gpu requires CUDA 12, but this container has CUDA 13
-# Parakeet ASR uses CPU provider instead (fast enough for short audio)
+# Runtime dependencies:
+# - CosyVoice source is mounted at /opt/CosyVoice (for cosyvoice.llm, cosyvoice.flow classes)
+# - PYTHONPATH=/opt/CosyVoice is set in docker-compose.yml
+# - Model assets are in /models/cosyvoice2_full/assets/
 
 # Triton 25.12-trtllm-python-py3 includes:
 # - TensorRT-LLM 1.0.0+ (Qwen3 TensorRT engine support)
