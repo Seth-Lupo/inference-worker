@@ -53,7 +53,7 @@ services:
       --model-repository=/models/asr
       --model-control-mode=explicit
       --load-model=qwen3_8b
-      --load-model=parakeet_tdt
+
     
       --strict-model-config=false
       --http-port=8000
