@@ -52,14 +52,8 @@ RUN pip install --no-cache-dir \
         wget \
         gdown
 
-# Install CosyVoice and Matcha-TTS from source (not pip packages, just add to PYTHONPATH)
-# Use --only-binary for grpcio to prevent slow source builds
-RUN git clone --recursive https://github.com/Seth-Lupo/CosyVoice.git /opt/CosyVoice && \
-    cd /opt/CosyVoice && \
-    pip install --no-cache-dir --only-binary grpcio -r requirements.txt || true
-
-# Add CosyVoice and Matcha-TTS to Python path
-ENV PYTHONPATH="/opt/CosyVoice:/opt/CosyVoice/third_party/Matcha-TTS:${PYTHONPATH}"
+# CosyVoice is mounted at runtime via docker-compose (no clone needed)
+# PYTHONPATH is set in docker-compose.yml environment
 
 # Note: onnxruntime-gpu requires CUDA 12, but this container has CUDA 13
 # Parakeet ASR uses CPU provider instead (fast enough for short audio)
