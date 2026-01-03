@@ -1,6 +1,6 @@
 name: "tensorrt_llm"
 backend: "tensorrtllm"
-max_batch_size: 1
+max_batch_size: 8
 
 model_transaction_policy {
   decoupled: True
@@ -113,7 +113,15 @@ parameters: {
 }
 parameters: {
   key: "kv_cache_free_gpu_mem_fraction"
-  value: { string_value: "0.5" }
+  value: { string_value: "0.1" }
+}
+parameters: {
+  key: "max_tokens_in_paged_kv_cache"
+  value: { string_value: "8192" }
+}
+parameters: {
+  key: "max_num_sequences"
+  value: { string_value: "8" }
 }
 parameters: {
   key: "exclude_input_in_output"

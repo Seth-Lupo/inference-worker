@@ -52,6 +52,7 @@ services:
       --model-repository=/models/llm
       --model-repository=/models/tts
       --model-control-mode=explicit
+      --model-load-thread-count=1
       --load-model=qwen3_8b
       --load-model=parakeet_tdt
       --load-model=cosyvoice2
@@ -59,8 +60,7 @@ services:
       --load-model=speaker_embedding
       --load-model=tensorrt_llm
       --load-model=token2wav
-      
-      --strict-model-config=false
+      --disable-auto-complete-config
       --http-port=8000
       --grpc-port=8001
       --metrics-port=8002
