@@ -105,12 +105,11 @@ mkdir -p "$WORK_DIR"
 stage_clone_repo() {
     log_step "Stage -1: Cloning CosyVoice repository..."
 
-    if [[ -d "${WORK_DIR}/CosyVoice/.git" ]]; then
-        log_info "CosyVoice repo already exists"
-        return 0
+    # Always re-clone to get latest changes
+    if [[ -d "${WORK_DIR}/CosyVoice" ]]; then
+        log_info "Removing existing CosyVoice repo..."
+        rm -rf "${WORK_DIR}/CosyVoice"
     fi
-
-    rm -rf "${WORK_DIR}/CosyVoice"
 
     log_info "Cloning ${COSYVOICE_REPO}..."
     git clone --recursive "$COSYVOICE_REPO" "${WORK_DIR}/CosyVoice" || {
@@ -118,7 +117,6 @@ stage_clone_repo() {
         return 1
     }
 
-    (cd "${WORK_DIR}/CosyVoice" && git submodule update --init --recursive)
     log_info "CosyVoice cloned successfully"
 }
 
@@ -275,11 +273,13 @@ stage_create_model_repo() {
     rm -rf "$MODEL_REPO"
     mkdir -p "$MODEL_REPO"
 
-    # Copy model templates
+    # Copy model templates (all 7 models)
     log_info "Copying model templates..."
     cp -r "${cosyvoice_triton}/cosyvoice2" "$MODEL_REPO/"
+    cp -r "${cosyvoice_triton}/cosyvoice2_dit" "$MODEL_REPO/"
     cp -r "${cosyvoice_triton}/tensorrt_llm" "$MODEL_REPO/"
     cp -r "${cosyvoice_triton}/token2wav" "$MODEL_REPO/"
+    cp -r "${cosyvoice_triton}/token2wav_dit" "$MODEL_REPO/"
     cp -r "${cosyvoice_triton}/audio_tokenizer" "$MODEL_REPO/"
     cp -r "${cosyvoice_triton}/speaker_embedding" "$MODEL_REPO/"
 
@@ -296,7 +296,13 @@ stage_create_model_repo() {
         python3 scripts/fill_template.py -i "${MODEL_REPO}/token2wav/config.pbtxt" \
             "model_dir:${model_dir},triton_max_batch_size:${TRITON_MAX_BATCH_SIZE},max_queue_delay_microseconds:0"
 
+        python3 scripts/fill_template.py -i "${MODEL_REPO}/token2wav_dit/config.pbtxt" \
+            "model_dir:${model_dir},triton_max_batch_size:${TRITON_MAX_BATCH_SIZE},max_queue_delay_microseconds:0"
+
         python3 scripts/fill_template.py -i "${MODEL_REPO}/cosyvoice2/config.pbtxt" \
+            "model_dir:${model_dir},bls_instance_num:${BLS_INSTANCE_NUM},llm_tokenizer_dir:${llm_tokenizer_dir},triton_max_batch_size:${TRITON_MAX_BATCH_SIZE},decoupled_mode:${DECOUPLED_MODE},max_queue_delay_microseconds:0"
+
+        python3 scripts/fill_template.py -i "${MODEL_REPO}/cosyvoice2_dit/config.pbtxt" \
             "model_dir:${model_dir},bls_instance_num:${BLS_INSTANCE_NUM},llm_tokenizer_dir:${llm_tokenizer_dir},triton_max_batch_size:${TRITON_MAX_BATCH_SIZE},decoupled_mode:${DECOUPLED_MODE},max_queue_delay_microseconds:0"
 
         python3 scripts/fill_template.py -i "${MODEL_REPO}/tensorrt_llm/config.pbtxt" \
