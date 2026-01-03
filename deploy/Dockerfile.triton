@@ -10,17 +10,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libsndfile1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Install PyTorch with CUDA 13.0 support + torchaudio
-RUN pip install --no-cache-dir \
-        torch torchaudio --index-url https://download.pytorch.org/whl/cu130
-
 # Install grpcio as pre-built binary (skip slow source compilation)
 RUN pip install --no-cache-dir --only-binary :all: grpcio grpcio-tools
 
+# Install torchaudio (torch already in base image)
+# --no-deps avoids reinstalling torch
+RUN pip install --no-cache-dir --no-deps \
+        torchaudio --index-url https://download.pytorch.org/whl/cu130
+
 # Install Python packages for Parakeet ASR and CosyVoice TTS
 RUN pip install --no-cache-dir \
-        # ASR (Parakeet) - ONNX to PyTorch conversion
+        # ASR (Parakeet)
+        sherpa-onnx \
         onnx2torch \
+        # ONNX runtime with GPU
+        onnxruntime-gpu \
         # Core ML
         numpy \
         scipy \

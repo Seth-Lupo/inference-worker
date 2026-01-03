@@ -103,16 +103,6 @@ parameters {
 }
 
 parameters {
-  key: "xgrammar_tokenizer_info_path"
-  value: { string_value: "${xgrammar_tokenizer_info_path}" }
-}
-
-parameters {
-  key: "guided_decoding_backend"
-  value: { string_value: "${guided_decoding_backend}" }
-}
-
-parameters {
   key: "batch_scheduler_policy"
   value: { string_value: "max_utilization" }
 }
