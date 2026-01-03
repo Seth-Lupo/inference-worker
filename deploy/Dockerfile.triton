@@ -1,79 +1,36 @@
 # Custom Triton image with TensorRT-LLM + Python dependencies
-# Using Triton 25.12 with TRT-LLM 1.0.0+ (Qwen3 TensorRT engine support)
 FROM nvcr.io/nvidia/tritonserver:25.12-trtllm-python-py3
 
-# Install system dependencies for audio processing
-# espeak-ng: required by phonemizer for text-to-phoneme conversion
-# libsndfile1: required by soundfile for audio I/O
+# Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
         espeak-ng \
         libsndfile1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Install grpcio as pre-built binary (skip slow source compilation)
+# Get torch version from base image, install matching torchaudio/torchvision
+# Then create constraints to prevent ANY package from changing torch versions
+RUN TORCH_VERSION=$(pip show torch | grep Version | cut -d' ' -f2) && \
+    CUDA_VERSION=$(python3 -c "import torch; print(torch.version.cuda.replace('.', '')[:3])") && \
+    echo "Base image: torch==${TORCH_VERSION} CUDA=${CUDA_VERSION}" && \
+    pip install --no-cache-dir --no-deps \
+        torchaudio torchvision \
+        --index-url https://download.pytorch.org/whl/cu${CUDA_VERSION} && \
+    echo "torch==${TORCH_VERSION}" > /tmp/constraints.txt && \
+    echo "torchaudio==$(pip show torchaudio | grep Version | cut -d' ' -f2)" >> /tmp/constraints.txt && \
+    echo "torchvision==$(pip show torchvision | grep Version | cut -d' ' -f2)" >> /tmp/constraints.txt && \
+    cat /tmp/constraints.txt
+
+# Install grpcio binary
 RUN pip install --no-cache-dir --only-binary :all: grpcio grpcio-tools
 
-# Install torchaudio (torch already in base image)
-# --no-deps avoids reinstalling torch
-RUN pip install --no-cache-dir --no-deps \
-        torchaudio --index-url https://download.pytorch.org/whl/cu130
-
-# Install Python packages for Parakeet ASR and CosyVoice TTS
-# Split into groups to avoid dependency conflicts
-
-# Core packages (binary only to avoid build issues)
-RUN pip install --no-cache-dir --only-binary :all: \
-        numpy scipy pyyaml
-
-# ML frameworks
-RUN pip install --no-cache-dir \
-        transformers \
-        sentencepiece \
-        einops \
+# All remaining installs use constraints to lock torch versions
+RUN pip install --no-cache-dir -c /tmp/constraints.txt \
+        numpy scipy pyyaml \
+        "transformers>=4.40.0" \
+        sentencepiece einops \
         pytorch-lightning==2.0.0 \
-        diffusers \
-        x-transformers \
-        conformer
-
-# Config/loading
-RUN pip install --no-cache-dir \
-        hydra-core \
-        omegaconf \
-        hyperpyyaml \
-        pydantic
-
-# Audio processing
-RUN pip install --no-cache-dir \
-        librosa \
-        soundfile \
-        pyworld \
-        phonemizer \
-        inflect \
-        Unidecode
-
-# ASR (Parakeet)
-RUN pip install --no-cache-dir \
-        sherpa-onnx \
-        onnx2torch \
-        onnxruntime-gpu
-
-# Audio tokenization
-RUN pip install --no-cache-dir \
-        s3tokenizer \
-        onnx \
-        openai-whisper \
-        wget \
-        gdown
-
-# Runtime dependencies:
-# - CosyVoice source is mounted at /opt/CosyVoice (for cosyvoice.llm, cosyvoice.flow classes)
-# - PYTHONPATH=/opt/CosyVoice is set in docker-compose.yml
-# - Model assets are in /models/cosyvoice2_full/assets/
-
-# Triton 25.12-trtllm-python-py3 includes:
-# - TensorRT-LLM 1.0.0+ (Qwen3 TensorRT engine support)
-# - Triton Inference Server with tensorrtllm + python backends
-#
-# IMPORTANT: Engines must be built with matching TRT-LLM version!
-# Use build container: nvcr.io/nvidia/tritonserver:25.12-trtllm-python-py3
-
+        diffusers x-transformers conformer \
+        hydra-core omegaconf hyperpyyaml pydantic \
+        librosa soundfile pyworld phonemizer inflect Unidecode \
+        sherpa-onnx onnx2torch onnxruntime-gpu \
+        s3tokenizer onnx openai-whisper wget gdown
