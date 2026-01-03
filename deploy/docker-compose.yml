@@ -6,10 +6,11 @@ services:
   # Models: qwen3_8b, parakeet_tdt, cosyvoice2 (7 submodels)
   # =============================================================================
   triton:
-    # Triton with TensorRT-LLM backend
+    # Custom Triton image with TensorRT-LLM + Python backends
     build:
-      context: ..
-      dockerfile: deploy/Dockerfile.triton
+      context: .
+      dockerfile: Dockerfile.triton
+    image: voice-agent-triton:latest
     container_name: voice-agent-triton
     restart: unless-stopped
 
@@ -39,7 +40,6 @@ services:
       - ./engine_cache:/engine_cache
       - ./logs/triton:/var/log/triton
       - ./qwen3_build:/qwen3_build
-      - ./cosyvoice_build:/cosyvoice_build
 
     environment:
       - CUDA_VISIBLE_DEVICES=0
@@ -48,13 +48,17 @@ services:
 
     command: >
       tritonserver
-      --model-repository=/models/tts
-      --model-repository=/models/llm
       --model-repository=/models/asr
+      --model-repository=/models/llm
+      --model-repository=/models/tts
       --model-control-mode=explicit
       --load-model=qwen3_8b
+      --load-model=cosyvoice2
+      --load-model=audio_tokenizer
+      --load-model=speaker_embedding
+      --load-model=tensorrt_llm
+      --load-model=token2wav
       --load-model=parakeet_tdt
-    
       --strict-model-config=false
       --http-port=8000
       --grpc-port=8001
