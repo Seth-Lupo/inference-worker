@@ -139,3 +139,7 @@ parameters: {
   key: "tokenizer_dir"
   value: { string_value: "/cosyvoice_build/cosyvoice2_llm" }
 }
+parameters: {
+  key: "xgrammar_tokenizer_info_path"
+  value: { string_value: "" }
+}
