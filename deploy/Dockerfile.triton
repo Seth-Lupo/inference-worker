@@ -24,6 +24,7 @@ RUN TORCH_VERSION=$(pip show torch | grep Version | cut -d' ' -f2) && \
 RUN pip install --no-cache-dir --only-binary :all: grpcio grpcio-tools
 
 # Install all dependencies
+# Note: matcha-tts is no longer needed - it's inlined in CosyVoice repo
 RUN pip install --no-cache-dir -c /tmp/constraints.txt \
         "transformers>=4.40.0" \
         sentencepiece einops \
@@ -31,9 +32,5 @@ RUN pip install --no-cache-dir -c /tmp/constraints.txt \
         hydra-core omegaconf hyperpyyaml pydantic \
         librosa soundfile pyworld phonemizer inflect Unidecode \
         sherpa-onnx onnxruntime-gpu \
-        "s3tokenizer==0.1.5" \
+        s3tokenizer \
         onnx wget gdown
-
-# Install matcha-tts (required by CosyVoice flow_matching)
-RUN pip install --no-cache-dir -c /tmp/constraints.txt \
-        git+https://github.com/shivammehta25/Matcha-TTS.git
