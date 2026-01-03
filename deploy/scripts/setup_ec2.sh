@@ -37,16 +37,38 @@ fi
 # -----------------------------------------------------------------------------
 # 2. Install Docker Compose (as CLI plugin)
 # -----------------------------------------------------------------------------
-log_info "Installing Docker Compose..."
-if ! docker compose version &> /dev/null; then
-    sudo mkdir -p /usr/local/lib/docker/cli-plugins
-    sudo curl -L https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64 \
-        -o /usr/local/lib/docker/cli-plugins/docker-compose
-    sudo chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
-    log_info "Docker Compose installed: $(docker compose version)"
-else
-    log_info "Docker Compose already installed: $(docker compose version)"
+log_info "Installing Docker Compose + Buildx..."
+
+ARCH=$(uname -m)
+[ "$ARCH" = "x86_64" ] && ARCH=amd64
+[ "$ARCH" = "aarch64" ] && ARCH=arm64
+
+PLUGIN_DIR="/usr/local/lib/docker/cli-plugins"
+sudo mkdir -p "$PLUGIN_DIR"
+
+# ---- Compose ----
+if ! docker compose version &>/dev/null; then
+  sudo curl -fL \
+    https://github.com/docker/compose/releases/latest/download/docker-compose-linux-${ARCH} \
+    -o "$PLUGIN_DIR/docker-compose"
+  sudo chmod +x "$PLUGIN_DIR/docker-compose"
 fi
+
+# ---- Buildx (REQUIRED by Compose) ----
+REQUIRED_BUILDX="0.17.1"
+if ! docker buildx version &>/dev/null || \
+   ! docker buildx version | grep -q "$REQUIRED_BUILDX"; then
+  sudo curl -fL \
+    https://github.com/docker/buildx/releases/download/v${REQUIRED_BUILDX}/buildx-v${REQUIRED_BUILDX}.linux-${ARCH} \
+    -o "$PLUGIN_DIR/docker-buildx"
+  sudo chmod +x "$PLUGIN_DIR/docker-buildx"
+  file "$PLUGIN_DIR/docker-buildx" | grep -q ELF || exit 1
+fi
+
+sudo systemctl restart docker
+
+log_info "Compose: $(docker compose version)"
+log_info "Buildx:  $(docker buildx version)"
 
 # -----------------------------------------------------------------------------
 # 3. Install Git LFS (required for downloading models from HuggingFace)
