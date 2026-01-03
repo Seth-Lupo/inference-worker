@@ -298,13 +298,13 @@ stage_build_onnx_trt() {
 
     # Build flow decoder estimator TRT (for token2wav vocoder)
     # Inputs: x, mask, mu, cond - all with shape (batch, channels, time)
-    # Requires large workspace (~4GB) for optimization
+    # Requires large workspace (~8GB) for optimization
     log_info "Building flow decoder estimator engine (this takes ~5-10 minutes)..."
     build_trt_engine \
         "${modelscope_dir}/flow.decoder.estimator.fp32.onnx" \
         "${modelscope_dir}/flow.decoder.estimator.fp16.engine" \
         --fp16 \
-        "--memPoolSize=workspace:8192MiB" \
+        "--memPoolSize=8192" \
         "--minShapes=x:2x80x4,mask:2x1x4,mu:2x80x4,cond:2x80x4" \
         "--optShapes=x:2x80x500,mask:2x1x500,mu:2x80x500,cond:2x80x500" \
         "--maxShapes=x:2x80x3000,mask:2x1x3000,mu:2x80x3000,cond:2x80x3000"
