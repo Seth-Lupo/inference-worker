@@ -252,7 +252,7 @@ readonly TRT_BUILD_IMAGE="${TRT_BUILD_IMAGE:-nvcr.io/nvidia/tritonserver:25.12-t
 
 # Build TensorRT engine from ONNX model
 # Usage: build_trt_engine <onnx_path> <engine_path> [--fp16] [--int8] [--workspace=MB] [--min-shapes=...] [--opt-shapes=...] [--max-shapes=...]
-# Example: build_trt_engine model.onnx model.trt --fp16 --workspace=4096
+# Example: build_trt_engine model.onnx model.engine --fp16 --workspace=4096
 build_trt_engine() {
     local onnx_path="$1"
     local engine_path="$2"
@@ -360,7 +360,7 @@ build_trt_engines_sequential() {
     local model
     for model in "${models[@]}"; do
         local onnx_path="${onnx_dir}/${model}"
-        local engine_name="${model%.onnx}.plan"
+        local engine_name="${model%.onnx}.engine"
         local engine_path="${engine_dir}/${engine_name}"
 
         build_trt_engine "$onnx_path" "$engine_path" "${trt_args[@]}" || return 1

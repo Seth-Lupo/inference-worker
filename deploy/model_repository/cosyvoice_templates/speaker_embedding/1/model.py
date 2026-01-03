@@ -111,7 +111,7 @@ class TritonPythonModel:
         model_dir = model_params["model_dir"]
         enable_trt = True
         if enable_trt:
-            self.load_spk_trt(f'{model_dir}/campplus.fp32.trt',
+            self.load_spk_trt(f'{model_dir}/campplus.engine',
                               f'{model_dir}/campplus.onnx',
                               1,
                               False)

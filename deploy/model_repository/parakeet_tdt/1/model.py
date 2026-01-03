@@ -91,9 +91,9 @@ class TritonPythonModel:
             pb_utils.Logger.log_info(f"CUDA device: {torch.cuda.get_device_name(0)}")
 
         # Check for TensorRT engines
-        encoder_engine = os.path.join(engine_dir, "encoder.plan")
-        decoder_engine = os.path.join(engine_dir, "decoder.plan")
-        joiner_engine = os.path.join(engine_dir, "joiner.plan")
+        encoder_engine = os.path.join(engine_dir, "encoder.engine")
+        decoder_engine = os.path.join(engine_dir, "decoder.engine")
+        joiner_engine = os.path.join(engine_dir, "joiner.engine")
 
         if not all(os.path.exists(p) for p in [encoder_engine, decoder_engine, joiner_engine]):
             missing = [p for p in [encoder_engine, decoder_engine, joiner_engine] if not os.path.exists(p)]

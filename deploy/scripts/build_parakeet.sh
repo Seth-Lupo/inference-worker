@@ -160,7 +160,7 @@ stage_build_trt_engines() {
     log_info "Building encoder engine..."
     build_trt_engine \
         "${onnx_dir}/encoder.onnx" \
-        "${ENGINE_DIR}/encoder.plan" \
+        "${ENGINE_DIR}/encoder.engine" \
         "$precision_flag" \
         "--minShapes=x:1x1000" \
         "--optShapes=x:1x160000" \
@@ -170,7 +170,7 @@ stage_build_trt_engines() {
     log_info "Building decoder engine..."
     build_trt_engine \
         "${onnx_dir}/decoder.onnx" \
-        "${ENGINE_DIR}/decoder.plan" \
+        "${ENGINE_DIR}/decoder.engine" \
         "$precision_flag" \
         "--minShapes=y:1x1" \
         "--optShapes=y:1x1" \
@@ -180,7 +180,7 @@ stage_build_trt_engines() {
     log_info "Building joiner engine..."
     build_trt_engine \
         "${onnx_dir}/joiner.onnx" \
-        "${ENGINE_DIR}/joiner.plan" \
+        "${ENGINE_DIR}/joiner.engine" \
         "$precision_flag" \
         "--minShapes=encoder_out:1x1x1024,decoder_out:1x1x512" \
         "--optShapes=encoder_out:1x1x1024,decoder_out:1x1x512" \
@@ -300,7 +300,7 @@ show_summary() {
     echo ""
     if [[ -d "$ENGINE_DIR" ]]; then
         echo "TRT Engines:"
-        ls -lh "${ENGINE_DIR}"/*.plan 2>/dev/null || echo "  (none)"
+        ls -lh "${ENGINE_DIR}"/*.engine 2>/dev/null || echo "  (none)"
         echo ""
     fi
     echo "To start Triton:"

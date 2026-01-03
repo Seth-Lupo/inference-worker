@@ -60,7 +60,8 @@ readonly MODEL_REPO="${DEPLOY_DIR}/model_repository/cosyvoice2_full"
 
 # Local CosyVoice source (no external cloning needed)
 readonly COSYVOICE_SRC="${DEPLOY_DIR}/../src/cosyvoice"
-readonly COSYVOICE_TRITON="${DEPLOY_DIR}/cosyvoice_triton"
+readonly COSYVOICE_TEMPLATES="${DEPLOY_DIR}/model_repository/cosyvoice_templates"
+readonly COSYVOICE_SCRIPTS="${DEPLOY_DIR}/scripts/cosyvoice"
 
 # =============================================================================
 # Load environment
@@ -113,9 +114,9 @@ echo ""
 mkdir -p "$WORK_DIR"
 
 # Verify local source exists
-if [[ ! -d "$COSYVOICE_TRITON" ]]; then
-    log_error "CosyVoice Triton source not found at: $COSYVOICE_TRITON"
-    log_error "Expected directory: deploy/cosyvoice_triton/"
+if [[ ! -d "$COSYVOICE_TEMPLATES" ]]; then
+    log_error "CosyVoice templates not found at: $COSYVOICE_TEMPLATES"
+    log_error "Expected directory: deploy/model_repository/cosyvoice_templates/"
     exit 1
 fi
 
@@ -224,7 +225,7 @@ stage_build_engines() {
         --ulimit memlock=-1 \
         --ulimit stack=67108864 \
         -v "${WORK_DIR}:/workspace/build" \
-        -v "${COSYVOICE_TRITON}/scripts:/workspace/scripts:ro" \
+        -v "${COSYVOICE_SCRIPTS}:/workspace/scripts:ro" \
         -v "${COSYVOICE_SRC}:/workspace/cosyvoice:ro" \
         -w /workspace/build \
         -e PYTHONPATH=/workspace \
@@ -275,10 +276,10 @@ stage_build_onnx_trt() {
 
     # Build speech_tokenizer TRT (for audio_tokenizer)
     # Input: mel (batch, 128, time) - variable time dimension
-    log_info "Building speech_tokenizer TRT engine..."
+    log_info "Building speech_tokenizer engine..."
     build_trt_engine \
         "${modelscope_dir}/speech_tokenizer_v2.onnx" \
-        "${modelscope_dir}/speech_tokenizer_v2.fp16.trt" \
+        "${modelscope_dir}/speech_tokenizer_v2.engine" \
         --fp16 \
         "--minShapes=mel:1x128x10" \
         "--optShapes=mel:1x128x500" \
@@ -286,10 +287,10 @@ stage_build_onnx_trt() {
 
     # Build campplus TRT (for speaker_embedding)
     # Input: input (batch, time, 80) - variable time dimension
-    log_info "Building campplus TRT engine..."
+    log_info "Building campplus engine..."
     build_trt_engine \
         "${modelscope_dir}/campplus.onnx" \
-        "${modelscope_dir}/campplus.fp32.trt" \
+        "${modelscope_dir}/campplus.engine" \
         --fp32 \
         "--minShapes=input:1x4x80" \
         "--optShapes=input:1x500x80" \
@@ -304,10 +305,8 @@ stage_build_onnx_trt() {
 stage_create_model_repo() {
     log_step "Stage 3: Creating Triton model repository..."
 
-    local model_templates="${COSYVOICE_TRITON}/model_repo"
-
-    if [[ ! -d "$model_templates" ]]; then
-        log_error "CosyVoice model_repo templates not found at: $model_templates"
+    if [[ ! -d "$COSYVOICE_TEMPLATES" ]]; then
+        log_error "CosyVoice templates not found at: $COSYVOICE_TEMPLATES"
         return 1
     fi
 
@@ -317,13 +316,13 @@ stage_create_model_repo() {
 
     # Copy model templates (all 7 models)
     log_info "Copying model templates..."
-    cp -r "${model_templates}/cosyvoice2" "$MODEL_REPO/"
-    cp -r "${model_templates}/cosyvoice2_dit" "$MODEL_REPO/"
-    cp -r "${model_templates}/tensorrt_llm" "$MODEL_REPO/"
-    cp -r "${model_templates}/token2wav" "$MODEL_REPO/"
-    cp -r "${model_templates}/token2wav_dit" "$MODEL_REPO/"
-    cp -r "${model_templates}/audio_tokenizer" "$MODEL_REPO/"
-    cp -r "${model_templates}/speaker_embedding" "$MODEL_REPO/"
+    cp -r "${COSYVOICE_TEMPLATES}/cosyvoice2" "$MODEL_REPO/"
+    cp -r "${COSYVOICE_TEMPLATES}/cosyvoice2_dit" "$MODEL_REPO/"
+    cp -r "${COSYVOICE_TEMPLATES}/tensorrt_llm" "$MODEL_REPO/"
+    cp -r "${COSYVOICE_TEMPLATES}/token2wav" "$MODEL_REPO/"
+    cp -r "${COSYVOICE_TEMPLATES}/token2wav_dit" "$MODEL_REPO/"
+    cp -r "${COSYVOICE_TEMPLATES}/audio_tokenizer" "$MODEL_REPO/"
+    cp -r "${COSYVOICE_TEMPLATES}/speaker_embedding" "$MODEL_REPO/"
 
     # Configuration paths (relative to /models/cosyvoice2_full in container)
     local engine_path="/models/cosyvoice2_full/tensorrt_llm/1/engine"
@@ -333,27 +332,27 @@ stage_create_model_repo() {
     # Fill templates
     log_info "Filling config templates..."
     (
-        cd "${COSYVOICE_TRITON}"
+        cd "${COSYVOICE_SCRIPTS}"
 
-        python3 scripts/fill_template.py -i "${MODEL_REPO}/token2wav/config.pbtxt" \
+        python3 fill_template.py -i "${MODEL_REPO}/token2wav/config.pbtxt" \
             "model_dir:${model_dir},triton_max_batch_size:${TRITON_MAX_BATCH_SIZE},max_queue_delay_microseconds:0"
 
-        python3 scripts/fill_template.py -i "${MODEL_REPO}/token2wav_dit/config.pbtxt" \
+        python3 fill_template.py -i "${MODEL_REPO}/token2wav_dit/config.pbtxt" \
             "model_dir:${model_dir},triton_max_batch_size:${TRITON_MAX_BATCH_SIZE},max_queue_delay_microseconds:0"
 
-        python3 scripts/fill_template.py -i "${MODEL_REPO}/cosyvoice2/config.pbtxt" \
+        python3 fill_template.py -i "${MODEL_REPO}/cosyvoice2/config.pbtxt" \
             "model_dir:${model_dir},bls_instance_num:${BLS_INSTANCE_NUM},llm_tokenizer_dir:${llm_tokenizer_dir},triton_max_batch_size:${TRITON_MAX_BATCH_SIZE},decoupled_mode:${DECOUPLED_MODE},max_queue_delay_microseconds:0"
 
-        python3 scripts/fill_template.py -i "${MODEL_REPO}/cosyvoice2_dit/config.pbtxt" \
+        python3 fill_template.py -i "${MODEL_REPO}/cosyvoice2_dit/config.pbtxt" \
             "model_dir:${model_dir},bls_instance_num:${BLS_INSTANCE_NUM},llm_tokenizer_dir:${llm_tokenizer_dir},triton_max_batch_size:${TRITON_MAX_BATCH_SIZE},decoupled_mode:${DECOUPLED_MODE},max_queue_delay_microseconds:0"
 
-        python3 scripts/fill_template.py -i "${MODEL_REPO}/tensorrt_llm/config.pbtxt" \
+        python3 fill_template.py -i "${MODEL_REPO}/tensorrt_llm/config.pbtxt" \
             "triton_backend:tensorrtllm,triton_max_batch_size:${TRITON_MAX_BATCH_SIZE},decoupled_mode:${DECOUPLED_MODE},max_beam_width:1,engine_dir:${engine_path},max_tokens_in_paged_kv_cache:2560,max_attention_window_size:2560,kv_cache_free_gpu_mem_fraction:0.5,exclude_input_in_output:True,enable_kv_cache_reuse:False,batching_strategy:inflight_fused_batching,max_queue_delay_microseconds:0,encoder_input_features_data_type:TYPE_FP16,logits_datatype:TYPE_FP32"
 
-        python3 scripts/fill_template.py -i "${MODEL_REPO}/audio_tokenizer/config.pbtxt" \
+        python3 fill_template.py -i "${MODEL_REPO}/audio_tokenizer/config.pbtxt" \
             "model_dir:${model_dir},triton_max_batch_size:${TRITON_MAX_BATCH_SIZE},max_queue_delay_microseconds:0"
 
-        python3 scripts/fill_template.py -i "${MODEL_REPO}/speaker_embedding/config.pbtxt" \
+        python3 fill_template.py -i "${MODEL_REPO}/speaker_embedding/config.pbtxt" \
             "model_dir:${model_dir},triton_max_batch_size:${TRITON_MAX_BATCH_SIZE},max_queue_delay_microseconds:0"
     )
 

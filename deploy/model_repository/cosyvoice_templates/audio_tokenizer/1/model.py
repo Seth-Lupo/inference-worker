@@ -170,7 +170,7 @@ class TritonPythonModel:
         self.device = torch.device("cuda")
         model_dir = model_params["model_dir"]
         onnx_path = os.path.join(model_dir, "speech_tokenizer_v2.onnx")
-        trt_path = os.path.join(model_dir, "speech_tokenizer_v2.fp16.trt")
+        trt_path = os.path.join(model_dir, "speech_tokenizer_v2.engine")
 
         # Use TensorRT for GPU inference (converts on first load)
         self.audio_tokenizer = TrtS3Tokenizer(trt_path, onnx_path, device=self.device, fp16=True)
