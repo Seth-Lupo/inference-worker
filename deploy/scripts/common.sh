@@ -242,3 +242,127 @@ require_gpu() {
 
     log_info "GPU: $(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)"
 }
+
+# =============================================================================
+# TensorRT Engine Building
+# =============================================================================
+
+# Default container for TRT building
+readonly TRT_BUILD_IMAGE="${TRT_BUILD_IMAGE:-nvcr.io/nvidia/tritonserver:25.12-trtllm-python-py3}"
+
+# Build TensorRT engine from ONNX model
+# Usage: build_trt_engine <onnx_path> <engine_path> [--fp16] [--int8] [--workspace=MB] [--min-shapes=...] [--opt-shapes=...] [--max-shapes=...]
+# Example: build_trt_engine model.onnx model.trt --fp16 --workspace=4096
+build_trt_engine() {
+    local onnx_path="$1"
+    local engine_path="$2"
+    shift 2
+
+    # Parse options
+    local precision="--fp16"
+    local workspace="4096"
+    local shapes_args=()
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --fp16) precision="--fp16"; shift ;;
+            --fp32) precision=""; shift ;;
+            --int8) precision="--int8"; shift ;;
+            --workspace=*) workspace="${1#*=}"; shift ;;
+            --minShapes=*|--optShapes=*|--maxShapes=*)
+                shapes_args+=("$1"); shift ;;
+            *) shift ;;
+        esac
+    done
+
+    # Check if engine already exists
+    if [[ -f "$engine_path" ]]; then
+        local size
+        size=$(get_file_size "$engine_path")
+        if [[ "$size" -gt 1000 ]]; then
+            log_info "TRT engine exists: $(basename "$engine_path") ($(numfmt --to=iec "$size" 2>/dev/null || echo "${size}B"))"
+            return 0
+        fi
+    fi
+
+    # Validate ONNX exists
+    if [[ ! -f "$onnx_path" ]]; then
+        log_error "ONNX model not found: $onnx_path"
+        return 1
+    fi
+
+    log_info "Building TRT engine: $(basename "$onnx_path") → $(basename "$engine_path")"
+
+    # Get absolute paths
+    local onnx_dir
+    onnx_dir=$(cd "$(dirname "$onnx_path")" && pwd)
+    local onnx_name
+    onnx_name=$(basename "$onnx_path")
+    local engine_name
+    engine_name=$(basename "$engine_path")
+    local engine_dir
+    engine_dir=$(cd "$(dirname "$engine_path")" && pwd)
+
+    # Build trtexec command
+    local trtexec_cmd="trtexec --onnx=/onnx/${onnx_name} --saveEngine=/engine/${engine_name}"
+    [[ -n "$precision" ]] && trtexec_cmd+=" $precision"
+    trtexec_cmd+=" --workspace=${workspace}"
+
+    for arg in "${shapes_args[@]}"; do
+        trtexec_cmd+=" $arg"
+    done
+
+    # Run in container
+    docker run --rm --gpus all \
+        --shm-size=4g \
+        -v "${onnx_dir}:/onnx:ro" \
+        -v "${engine_dir}:/engine" \
+        "$TRT_BUILD_IMAGE" \
+        bash -c "$trtexec_cmd" || {
+            log_error "trtexec failed for $(basename "$onnx_path")"
+            return 1
+        }
+
+    # Verify output
+    if [[ ! -f "$engine_path" ]]; then
+        log_error "Engine not created: $engine_path"
+        return 1
+    fi
+
+    local final_size
+    final_size=$(get_file_size "$engine_path")
+    log_info "Built: $(basename "$engine_path") ($(numfmt --to=iec "$final_size" 2>/dev/null || echo "${final_size}B"))"
+}
+
+# Build multiple TRT engines sequentially (avoids OOM)
+# Usage: build_trt_engines_sequential <onnx_dir> <engine_dir> <model1.onnx> [model2.onnx ...] [-- trtexec_args]
+build_trt_engines_sequential() {
+    local onnx_dir="$1"
+    local engine_dir="$2"
+    shift 2
+
+    local models=()
+    local trt_args=()
+    local parsing_models=true
+
+    for arg in "$@"; do
+        if [[ "$arg" == "--" ]]; then
+            parsing_models=false
+        elif $parsing_models; then
+            models+=("$arg")
+        else
+            trt_args+=("$arg")
+        fi
+    done
+
+    mkdir -p "$engine_dir"
+
+    local model
+    for model in "${models[@]}"; do
+        local onnx_path="${onnx_dir}/${model}"
+        local engine_name="${model%.onnx}.plan"
+        local engine_path="${engine_dir}/${engine_name}"
+
+        build_trt_engine "$onnx_path" "$engine_path" "${trt_args[@]}" || return 1
+    done
+}

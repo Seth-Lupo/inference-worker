@@ -36,7 +36,7 @@ services:
 
     volumes:
       - ./model_repository:/models
-      - ./cosyvoice_build/CosyVoice:/opt/CosyVoice
+      - ../src/cosyvoice:/opt/cosyvoice:ro
       - ./engine_cache:/engine_cache
       - ./logs/triton:/var/log/triton
       - ./qwen3_build:/qwen3_build
@@ -44,7 +44,7 @@ services:
     environment:
       - CUDA_VISIBLE_DEVICES=0
       - TRT_LOGGER_LEVEL=WARNING
-      - PYTHONPATH=/opt/CosyVoice
+      - PYTHONPATH=/opt
 
     command: >
       tritonserver

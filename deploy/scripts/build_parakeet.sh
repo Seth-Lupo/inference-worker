@@ -2,8 +2,19 @@
 # =============================================================================
 # Build Parakeet TDT 0.6B V2 for Triton (ASR Model)
 #
-# Downloads pre-converted ONNX models from sherpa-onnx releases.
-# Uses Python backend with sherpa-onnx for transducer decoding.
+# Downloads pre-converted ONNX models from sherpa-onnx releases,
+# builds TensorRT engines for GPU inference, and creates Triton model repository.
+#
+# Usage:
+#   ./build_parakeet.sh [START_STAGE] [STOP_STAGE]
+#   ./build_parakeet.sh 0 2      # Run all stages
+#   ./build_parakeet.sh 1 1      # Only build TRT engines
+#   ./build_parakeet.sh cleanup  # Clean up build artifacts
+#
+# Stages:
+#   0: Download ONNX models from sherpa-onnx
+#   1: Build TensorRT engines (encoder, decoder, joiner)
+#   2: Create Triton model repository
 #
 # Sources:
 #   - https://github.com/k2-fsa/sherpa-onnx/releases
@@ -21,10 +32,14 @@ readonly MODEL_NAME="parakeet_tdt"
 readonly SHERPA_VERSION="asr-models"
 readonly SHERPA_ARCHIVE="sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8.tar.bz2"
 
+# TRT build settings
+TRT_PRECISION="${TRT_PRECISION:-fp16}"
+
 # Paths
 readonly DEPLOY_DIR="$(get_deploy_dir)"
 readonly WORK_DIR="${DEPLOY_DIR}/parakeet_build"
 readonly MODEL_DIR="${DEPLOY_DIR}/model_repository/${MODEL_NAME}"
+readonly ENGINE_DIR="${MODEL_DIR}/1/engines"
 
 # =============================================================================
 # Cleanup Handler
@@ -41,27 +56,51 @@ if [[ "${1:-}" == "cleanup" || "${1:-}" == "clean" ]]; then
             rm -rf "$MODEL_DIR"
             log_info "Cleanup complete"
             ;;
+        --engines|-e)
+            log_info "Removing TRT engines only..."
+            rm -rf "$ENGINE_DIR"
+            log_info "Engines removed"
+            ;;
         *)
-            log_info "Removing work directory (keeping model)..."
+            log_info "Removing work directory (keeping model & engines)..."
             rm -rf "$WORK_DIR"
             log_info "Cleanup complete"
             log_info "To also remove model: $0 cleanup --all"
+            log_info "To rebuild engines:   $0 cleanup --engines"
             ;;
     esac
     exit 0
 fi
 
+# Parse stages
+START_STAGE="${1:-0}"
+STOP_STAGE="${2:-2}"
+
+echo "=============================================="
+echo "Building Parakeet TDT 0.6B V2"
+echo "=============================================="
+echo "Stages: ${START_STAGE} to ${STOP_STAGE}"
+echo ""
+
 # =============================================================================
-# Main Functions
+# Stage 0: Download Models
 # =============================================================================
 
-download_sherpa_model() {
-    log_step "Downloading Parakeet from sherpa-onnx..."
+stage_download_models() {
+    log_step "Stage 0: Downloading Parakeet from sherpa-onnx..."
 
     local url="https://github.com/k2-fsa/sherpa-onnx/releases/download/${SHERPA_VERSION}/${SHERPA_ARCHIVE}"
     local archive="${WORK_DIR}/${SHERPA_ARCHIVE}"
 
     mkdir -p "$WORK_DIR"
+
+    # Check if already extracted
+    local extracted
+    extracted=$(find "$WORK_DIR" -maxdepth 1 -type d -name "sherpa-onnx-*parakeet*" 2>/dev/null | head -1)
+    if [[ -n "$extracted" && -f "${extracted}/encoder.onnx" ]]; then
+        log_info "Models already downloaded at: $extracted"
+        return 0
+    fi
 
     # Download if not exists
     if [[ ! -f "$archive" ]]; then
@@ -85,33 +124,94 @@ download_sherpa_model() {
     log_info "Extracting archive..."
     (cd "$WORK_DIR" && tar -xjf "$SHERPA_ARCHIVE")
 
-    # Find extracted directory (sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8)
-    local extracted
+    # Verify extraction
     extracted=$(find "$WORK_DIR" -maxdepth 1 -type d -name "sherpa-onnx-*parakeet*" | head -1)
-
-    if [[ -z "$extracted" || ! -d "$extracted" ]]; then
-        log_error "Could not find extracted directory"
+    if [[ -z "$extracted" || ! -f "${extracted}/encoder.onnx" ]]; then
+        log_error "Could not find extracted ONNX models"
         ls -la "$WORK_DIR"
         return 1
     fi
 
-    log_info "Found: $extracted"
-    echo "$extracted"
+    log_info "Downloaded: $extracted"
 }
 
-setup_model_repository() {
-    local source_dir="$1"
+# =============================================================================
+# Stage 1: Build TensorRT Engines
+# =============================================================================
 
-    log_step "Setting up Triton model repository..."
+stage_build_trt_engines() {
+    log_step "Stage 1: Building TensorRT engines..."
+
+    # Find ONNX models
+    local onnx_dir
+    onnx_dir=$(find "$WORK_DIR" -maxdepth 1 -type d -name "sherpa-onnx-*parakeet*" | head -1)
+    if [[ -z "$onnx_dir" ]]; then
+        log_error "ONNX models not found. Run stage 0 first."
+        return 1
+    fi
+
+    mkdir -p "$ENGINE_DIR"
+
+    # Determine precision flag
+    local precision_flag="--fp16"
+    [[ "$TRT_PRECISION" == "fp32" ]] && precision_flag="--fp32"
+
+    # Build encoder (audio input: variable length)
+    log_info "Building encoder engine..."
+    build_trt_engine \
+        "${onnx_dir}/encoder.onnx" \
+        "${ENGINE_DIR}/encoder.plan" \
+        "$precision_flag" \
+        "--minShapes=x:1x1000" \
+        "--optShapes=x:1x160000" \
+        "--maxShapes=x:1x480000"
+
+    # Build decoder (single token input)
+    log_info "Building decoder engine..."
+    build_trt_engine \
+        "${onnx_dir}/decoder.onnx" \
+        "${ENGINE_DIR}/decoder.plan" \
+        "$precision_flag" \
+        "--minShapes=y:1x1" \
+        "--optShapes=y:1x1" \
+        "--maxShapes=y:1x1"
+
+    # Build joiner (fixed size hidden states)
+    log_info "Building joiner engine..."
+    build_trt_engine \
+        "${onnx_dir}/joiner.onnx" \
+        "${ENGINE_DIR}/joiner.plan" \
+        "$precision_flag" \
+        "--minShapes=encoder_out:1x1x1024,decoder_out:1x1x512" \
+        "--optShapes=encoder_out:1x1x1024,decoder_out:1x1x512" \
+        "--maxShapes=encoder_out:1x1x1024,decoder_out:1x1x512"
+
+    log_info "TRT engines built at: $ENGINE_DIR"
+}
+
+# =============================================================================
+# Stage 2: Create Model Repository
+# =============================================================================
+
+stage_create_model_repo() {
+    log_step "Stage 2: Creating Triton model repository..."
+
+    # Find ONNX source
+    local source_dir
+    source_dir=$(find "$WORK_DIR" -maxdepth 1 -type d -name "sherpa-onnx-*parakeet*" | head -1)
+    if [[ -z "$source_dir" ]]; then
+        log_error "ONNX models not found. Run stage 0 first."
+        return 1
+    fi
 
     mkdir -p "${MODEL_DIR}/1"
 
-    # Copy ONNX files
+    # Copy ONNX files (needed as fallback if TRT fails)
     log_info "Copying ONNX files..."
-    cp -v "${source_dir}"/*.onnx "${MODEL_DIR}/1/"
+    cp "${source_dir}"/*.onnx "${MODEL_DIR}/1/" 2>/dev/null || true
 
     # Copy tokens
-    cp -v "${source_dir}/tokens.txt" "${MODEL_DIR}/1/"
+    cp "${source_dir}/tokens.txt" "${MODEL_DIR}/1/"
 
     # Rename INT8 files to standard names if needed
     local f
@@ -136,11 +236,11 @@ setup_model_repository() {
 }
 
 create_triton_config() {
-    log_step "Creating Triton configuration..."
+    log_info "Creating Triton configuration..."
 
     cat > "${MODEL_DIR}/config.pbtxt" << 'EOF'
 # Parakeet TDT 0.6B V2 - Automatic Speech Recognition
-# Uses sherpa-onnx Python backend for transducer decoding
+# Uses TensorRT engines for GPU inference with Python backend
 
 name: "parakeet_tdt"
 backend: "python"
@@ -187,137 +287,52 @@ EOF
     log_info "Created: ${MODEL_DIR}/config.pbtxt"
 }
 
-create_python_backend() {
-    log_step "Creating Python backend model..."
-
-    cat > "${MODEL_DIR}/1/model.py" << 'PYTHON'
-"""
-Parakeet TDT 0.6B V2 - Triton Python Backend
-Wraps sherpa-onnx for transducer-based ASR.
-"""
-import os
-import json
-import numpy as np
-import triton_python_backend_utils as pb_utils
-
-
-class TritonPythonModel:
-    """Triton Python backend for Parakeet TDT ASR."""
-
-    def initialize(self, args):
-        """Load the sherpa-onnx recognizer."""
-        self.model_config = json.loads(args["model_config"])
-        model_dir = os.path.dirname(os.path.realpath(__file__))
-
-        try:
-            import sherpa_onnx
-            self._init_sherpa(model_dir, sherpa_onnx)
-        except ImportError as e:
-            pb_utils.Logger.log_error(f"sherpa_onnx not installed: {e}")
-            raise
-
-        pb_utils.Logger.log_info("Parakeet TDT initialized successfully")
-
-    def _init_sherpa(self, model_dir, sherpa_onnx):
-        """Initialize sherpa-onnx recognizer."""
-        encoder = os.path.join(model_dir, "encoder.onnx")
-        decoder = os.path.join(model_dir, "decoder.onnx")
-        joiner = os.path.join(model_dir, "joiner.onnx")
-        tokens = os.path.join(model_dir, "tokens.txt")
-
-        # Verify files exist
-        for f in [encoder, decoder, joiner, tokens]:
-            if not os.path.exists(f):
-                raise FileNotFoundError(f"Missing: {f}")
-
-        pb_utils.Logger.log_info("Initializing sherpa-onnx with CUDA provider...")
-
-        self.recognizer = sherpa_onnx.OfflineRecognizer.from_transducer(
-            encoder=encoder,
-            decoder=decoder,
-            joiner=joiner,
-            tokens=tokens,
-            num_threads=4,
-            provider="cuda",
-        )
-
-    def execute(self, requests):
-        """Run inference on batch of audio inputs."""
-        responses = []
-
-        for request in requests:
-            audio_tensor = pb_utils.get_input_tensor_by_name(request, "audio")
-            audio = audio_tensor.as_numpy().flatten().astype(np.float32)
-
-            # Normalize audio to [-1, 1] range if needed
-            if audio.max() > 1.0 or audio.min() < -1.0:
-                audio = audio / 32768.0
-
-            # Run recognition
-            stream = self.recognizer.create_stream()
-            stream.accept_waveform(16000, audio)
-            self.recognizer.decode_stream(stream)
-            text = stream.result.text.strip()
-
-            # Create response
-            output = pb_utils.Tensor("transcription", np.array([text], dtype=object))
-            responses.append(pb_utils.InferenceResponse([output]))
-
-        return responses
-
-    def finalize(self):
-        """Cleanup."""
-        pass
-PYTHON
-
-    log_info "Created: ${MODEL_DIR}/1/model.py"
-}
-
-verify_setup() {
-    log_step "Verifying setup..."
-
+show_summary() {
     echo ""
-    echo "Model directory contents:"
-    ls -la "${MODEL_DIR}/1/"
-
-    echo ""
-    log_info "Parakeet TDT setup complete!"
+    echo "=============================================="
+    echo -e "${GREEN}Parakeet TDT Build Complete${NC}"
+    echo "=============================================="
     echo ""
     echo "Model location: ${MODEL_DIR}"
     echo ""
-    echo "To load in Triton, add to docker-compose.yml command:"
-    echo "  --load-model=parakeet_tdt"
+    echo "Contents:"
+    ls -la "${MODEL_DIR}/1/" 2>/dev/null || echo "  (run all stages to build)"
+    echo ""
+    if [[ -d "$ENGINE_DIR" ]]; then
+        echo "TRT Engines:"
+        ls -lh "${ENGINE_DIR}"/*.plan 2>/dev/null || echo "  (none)"
+        echo ""
+    fi
+    echo "To start Triton:"
+    echo "  docker compose up -d triton"
+    echo ""
+    echo "Cleanup options:"
+    echo "  $0 cleanup            # Remove downloads, keep model"
+    echo "  $0 cleanup --all      # Remove everything"
+    echo "  $0 cleanup --engines  # Rebuild TRT engines only"
 }
 
 # =============================================================================
 # Main
 # =============================================================================
 main() {
-    echo "=============================================="
-    echo "Building Parakeet TDT 0.6B V2"
-    echo "=============================================="
-    echo ""
-
-    # Check if model already exists with valid files
-    if is_real_file "${MODEL_DIR}/1/encoder.onnx"; then
-        log_info "Parakeet model already exists at ${MODEL_DIR}"
-        log_info "Run '$0 cleanup --all' to rebuild"
-        exit 0
+    # Stage 0: Download models
+    if [[ $START_STAGE -le 0 && $STOP_STAGE -ge 0 ]]; then
+        stage_download_models
     fi
 
-    # Download and extract
-    local extracted_dir
-    extracted_dir=$(download_sherpa_model)
+    # Stage 1: Build TRT engines
+    if [[ $START_STAGE -le 1 && $STOP_STAGE -ge 1 ]]; then
+        stage_build_trt_engines
+    fi
 
-    # Setup model repository
-    setup_model_repository "$extracted_dir"
+    # Stage 2: Create model repo
+    if [[ $START_STAGE -le 2 && $STOP_STAGE -ge 2 ]]; then
+        stage_create_model_repo
+        create_triton_config
+    fi
 
-    # Create configs
-    create_triton_config
-    create_python_backend
-
-    # Verify
-    verify_setup
+    show_summary
 }
 
-main "$@"
+main

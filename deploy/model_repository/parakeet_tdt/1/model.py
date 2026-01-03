@@ -76,7 +76,7 @@ class TritonPythonModel:
     """Parakeet TDT ASR using TensorRT GPU."""
 
     def initialize(self, args):
-        """Load TensorRT engines or fall back to PyTorch."""
+        """Load pre-built TensorRT engines for GPU inference."""
         import torch
 
         self.model_config = json.loads(args["model_config"])
@@ -95,62 +95,24 @@ class TritonPythonModel:
         decoder_engine = os.path.join(engine_dir, "decoder.plan")
         joiner_engine = os.path.join(engine_dir, "joiner.plan")
 
-        if all(os.path.exists(p) for p in [encoder_engine, decoder_engine, joiner_engine]):
-            pb_utils.Logger.log_info("Loading TensorRT engines...")
-            self.use_trt = True
-            self.encoder = TensorRTInference(encoder_engine)
-            self.decoder = TensorRTInference(decoder_engine)
-            self.joiner = TensorRTInference(joiner_engine)
-            pb_utils.Logger.log_info("TensorRT engines loaded")
-        else:
-            pb_utils.Logger.log_info("TensorRT engines not found, using ONNX Runtime")
-            self.use_trt = False
-            self._load_pytorch(model_dir)
+        if not all(os.path.exists(p) for p in [encoder_engine, decoder_engine, joiner_engine]):
+            missing = [p for p in [encoder_engine, decoder_engine, joiner_engine] if not os.path.exists(p)]
+            pb_utils.Logger.log_error(f"TensorRT engines not found: {missing}")
+            pb_utils.Logger.log_error("Run: ./deploy/scripts/build_parakeet.sh to build engines")
+            raise RuntimeError("TensorRT engines not found. Run build_parakeet.sh first.")
+
+        pb_utils.Logger.log_info("Loading TensorRT engines...")
+        self.use_trt = True
+        self.encoder = TensorRTInference(encoder_engine)
+        self.decoder = TensorRTInference(decoder_engine)
+        self.joiner = TensorRTInference(joiner_engine)
+        pb_utils.Logger.log_info("TensorRT engines loaded")
 
         # Load vocabulary
         self.vocab = self._load_vocab(os.path.join(model_dir, "tokens.txt"))
         self.blank_id = 0
 
-        backend = "TensorRT" if self.use_trt else "ONNX Runtime"
-        pb_utils.Logger.log_info(f"Parakeet initialized: vocab={len(self.vocab)}, backend={backend}, device={self.device}")
-
-    def _load_pytorch(self, model_dir):
-        """Fallback to ONNX Runtime (supports INT8 quantized models)."""
-        import onnxruntime as ort
-
-        # Use CUDA execution provider
-        providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
-        sess_options = ort.SessionOptions()
-        sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-
-        pb_utils.Logger.log_info("Loading encoder (ONNX Runtime)...")
-        self.encoder = ort.InferenceSession(
-            os.path.join(model_dir, "encoder.onnx"),
-            sess_options=sess_options,
-            providers=providers
-        )
-
-        pb_utils.Logger.log_info("Loading decoder (ONNX Runtime)...")
-        self.decoder = ort.InferenceSession(
-            os.path.join(model_dir, "decoder.onnx"),
-            sess_options=sess_options,
-            providers=providers
-        )
-
-        pb_utils.Logger.log_info("Loading joiner (ONNX Runtime)...")
-        self.joiner = ort.InferenceSession(
-            os.path.join(model_dir, "joiner.onnx"),
-            sess_options=sess_options,
-            providers=providers
-        )
-
-        # Store input/output names for inference
-        self.encoder_input = self.encoder.get_inputs()[0].name
-        self.encoder_output = self.encoder.get_outputs()[0].name
-        self.decoder_input = self.decoder.get_inputs()[0].name
-        self.decoder_output = self.decoder.get_outputs()[0].name
-        self.joiner_inputs = [inp.name for inp in self.joiner.get_inputs()]
-        self.joiner_output = self.joiner.get_outputs()[0].name
+        pb_utils.Logger.log_info(f"Parakeet initialized: vocab={len(self.vocab)}, backend=TensorRT, device={self.device}")
 
     def _load_vocab(self, path):
         """Load token vocabulary."""
@@ -188,22 +150,12 @@ class TritonPythonModel:
         return responses
 
     def _transcribe(self, audio):
-        """Transcribe audio to text."""
+        """Transcribe audio to text using TensorRT."""
         import torch
 
-        # Encoder
         try:
-            if self.use_trt:
-                audio_tensor = torch.from_numpy(audio).unsqueeze(0).to(self.device)
-                encoder_out = self.encoder(audio_tensor)
-            else:
-                # ONNX Runtime path
-                audio_input = audio.reshape(1, -1).astype(np.float32)
-                encoder_out = self.encoder.run(
-                    [self.encoder_output],
-                    {self.encoder_input: audio_input}
-                )[0]
-                encoder_out = torch.from_numpy(encoder_out).to(self.device)
+            audio_tensor = torch.from_numpy(audio).unsqueeze(0).to(self.device)
+            encoder_out = self.encoder(audio_tensor)
         except Exception as e:
             pb_utils.Logger.log_error(f"Encoder error: {e}")
             return ""
@@ -213,7 +165,7 @@ class TritonPythonModel:
         return self._tokens_to_text(tokens)
 
     def _greedy_decode(self, encoder_out):
-        """Greedy transducer decoding."""
+        """Greedy transducer decoding using TensorRT."""
         import torch
 
         if encoder_out.dim() == 2:
@@ -221,35 +173,17 @@ class TritonPythonModel:
 
         batch_size, num_frames, enc_dim = encoder_out.shape
         tokens = []
-        decoder_input = np.array([[self.blank_id]], dtype=np.int64)
+        decoder_input = torch.tensor([[self.blank_id]], dtype=torch.int64, device=self.device)
 
         for t in range(num_frames):
-            enc_frame = encoder_out[:, t:t+1, :].cpu().numpy()
+            enc_frame = encoder_out[:, t:t+1, :]
 
             for _ in range(10):
                 try:
-                    if self.use_trt:
-                        decoder_input_t = torch.from_numpy(decoder_input).to(self.device)
-                        enc_frame_t = torch.from_numpy(enc_frame).to(self.device)
-                        decoder_out = self.decoder(decoder_input_t)
-                        joiner_out = self.joiner(enc_frame_t, decoder_out)
-                        logits = joiner_out.squeeze()
-                        token_id = int(torch.argmax(logits).item())
-                    else:
-                        # ONNX Runtime path
-                        decoder_out = self.decoder.run(
-                            [self.decoder_output],
-                            {self.decoder_input: decoder_input}
-                        )[0]
-                        joiner_out = self.joiner.run(
-                            [self.joiner_output],
-                            {
-                                self.joiner_inputs[0]: enc_frame.astype(np.float32),
-                                self.joiner_inputs[1]: decoder_out.astype(np.float32)
-                            }
-                        )[0]
-                        logits = joiner_out.squeeze()
-                        token_id = int(np.argmax(logits))
+                    decoder_out = self.decoder(decoder_input)
+                    joiner_out = self.joiner(enc_frame, decoder_out)
+                    logits = joiner_out.squeeze()
+                    token_id = int(torch.argmax(logits).item())
                 except Exception:
                     break
 
@@ -257,7 +191,7 @@ class TritonPythonModel:
                     break
                 else:
                     tokens.append(token_id)
-                    decoder_input = np.array([[token_id]], dtype=np.int64)
+                    decoder_input = torch.tensor([[token_id]], dtype=torch.int64, device=self.device)
 
         return tokens
 

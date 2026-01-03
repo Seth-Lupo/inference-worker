@@ -11,25 +11,25 @@
 #
 # Usage:
 #   ./build_cosyvoice.sh [START_STAGE] [STOP_STAGE]
-#   ./build_cosyvoice.sh -1 2      # Run all stages
-#   ./build_cosyvoice.sh 0 2       # Download + build (skip clone if exists)
-#   ./build_cosyvoice.sh 2 2       # Only rebuild model repository
+#   ./build_cosyvoice.sh 0 3       # Run all stages
+#   ./build_cosyvoice.sh 1 1       # Only build TRT-LLM engines
+#   ./build_cosyvoice.sh 3 3       # Only rebuild model repository
 #   ./build_cosyvoice.sh cleanup   # Clean up build artifacts
 #
 # Stages:
-#   -1: Clone CosyVoice repository (always re-clones)
 #    0: Download models from HuggingFace/ModelScope
-#    1: Build TensorRT-LLM engines
-#    2: Create Triton model repository
+#    1: Build TensorRT-LLM engines (LLM)
+#    2: Build ONNX→TRT engines (audio_tokenizer, speaker_embedding)
+#    3: Create Triton model repository
 #
 # Environment Variables:
-#   COSYVOICE_REPO    - Git repo URL (default: github.com/Seth-Lupo/CosyVoice)
 #   HF_TOKEN          - HuggingFace token for gated models
 #   TRT_DTYPE         - TensorRT dtype: bfloat16, float16 (default: bfloat16)
 #   TRITON_MAX_BATCH_SIZE - Max batch size (default: 16)
 #
 # Sources:
-#   - https://github.com/Seth-Lupo/CosyVoice (fork with GPU configs)
+#   - Local: deploy/cosyvoice_triton/ (model templates and scripts)
+#   - Local: src/cosyvoice/ (Python package)
 #   - https://huggingface.co/yuekai/cosyvoice2_llm
 #   - https://modelscope.cn/models/iic/CosyVoice2-0.5B
 # =============================================================================
@@ -41,7 +41,6 @@ source "${SCRIPT_DIR}/common.sh"
 # =============================================================================
 # Configuration
 # =============================================================================
-COSYVOICE_REPO="${COSYVOICE_REPO:-https://github.com/Seth-Lupo/CosyVoice.git}"
 HF_MODEL="${HF_MODEL:-yuekai/cosyvoice2_llm}"
 MODELSCOPE_MODEL="${MODELSCOPE_MODEL:-iic/CosyVoice2-0.5B}"
 
@@ -58,6 +57,10 @@ DECOUPLED_MODE="${DECOUPLED_MODE:-True}"
 readonly DEPLOY_DIR="$(get_deploy_dir)"
 readonly WORK_DIR="${DEPLOY_DIR}/cosyvoice_build"
 readonly MODEL_REPO="${DEPLOY_DIR}/model_repository/cosyvoice2_full"
+
+# Local CosyVoice source (no external cloning needed)
+readonly COSYVOICE_SRC="${DEPLOY_DIR}/../src/cosyvoice"
+readonly COSYVOICE_TRITON="${DEPLOY_DIR}/cosyvoice_triton"
 
 # =============================================================================
 # Load environment
@@ -89,7 +92,6 @@ if [[ "${1:-}" == "cleanup" || "${1:-}" == "clean" ]]; then
             log_info "Removing downloads (keeping engines)..."
             rm -rf "${WORK_DIR}/cosyvoice2_llm"
             rm -rf "${WORK_DIR}/CosyVoice2-0.5B"
-            rm -rf "${WORK_DIR}/CosyVoice"
             rm -rf "${WORK_DIR}"/trt_weights_*
             log_info "Kept: ${WORK_DIR}/trt_engines_*"
             ;;
@@ -99,7 +101,7 @@ fi
 
 # Parse stages
 START_STAGE="${1:-0}"
-STOP_STAGE="${2:-2}"
+STOP_STAGE="${2:-3}"
 
 echo "=============================================="
 echo "Building CosyVoice 2 TensorRT-LLM"
@@ -110,26 +112,12 @@ echo ""
 
 mkdir -p "$WORK_DIR"
 
-# =============================================================================
-# Stage -1: Clone CosyVoice Repository
-# =============================================================================
-stage_clone_repo() {
-    log_step "Stage -1: Cloning CosyVoice repository..."
-
-    # Always re-clone to get latest changes
-    if [[ -d "${WORK_DIR}/CosyVoice" ]]; then
-        log_info "Removing existing CosyVoice repo..."
-        rm -rf "${WORK_DIR}/CosyVoice"
-    fi
-
-    log_info "Cloning ${COSYVOICE_REPO}..."
-    git clone --recursive "$COSYVOICE_REPO" "${WORK_DIR}/CosyVoice" || {
-        log_error "Failed to clone CosyVoice repository"
-        return 1
-    }
-
-    log_info "CosyVoice cloned successfully"
-}
+# Verify local source exists
+if [[ ! -d "$COSYVOICE_TRITON" ]]; then
+    log_error "CosyVoice Triton source not found at: $COSYVOICE_TRITON"
+    log_error "Expected directory: deploy/cosyvoice_triton/"
+    exit 1
+fi
 
 # =============================================================================
 # Stage 0: Download Models
@@ -236,9 +224,10 @@ stage_build_engines() {
         --ulimit memlock=-1 \
         --ulimit stack=67108864 \
         -v "${WORK_DIR}:/workspace/build" \
-        -v "${WORK_DIR}/CosyVoice:/workspace/CosyVoice" \
+        -v "${COSYVOICE_TRITON}/scripts:/workspace/scripts:ro" \
+        -v "${COSYVOICE_SRC}:/workspace/cosyvoice:ro" \
         -w /workspace/build \
-        -e PYTHONPATH=/workspace/CosyVoice \
+        -e PYTHONPATH=/workspace \
         "$TRTLLM_IMAGE" \
         bash -c "
             set -e
@@ -251,7 +240,7 @@ stage_build_engines() {
             pip install -q transformers sentencepiece accelerate 2>/dev/null || true
 
             echo '=== Converting checkpoint ==='
-            python3 /workspace/CosyVoice/runtime/triton_trtllm/scripts/convert_checkpoint.py \
+            python3 /workspace/scripts/convert_checkpoint.py \
                 --model_dir ./cosyvoice2_llm \
                 --output_dir ./trt_weights_${TRT_DTYPE} \
                 --dtype ${TRT_DTYPE}
@@ -272,16 +261,53 @@ stage_build_engines() {
 }
 
 # =============================================================================
-# Stage 2: Create Model Repository
+# Stage 2: Build ONNX→TRT Engines for Audio Processing
+# =============================================================================
+stage_build_onnx_trt() {
+    log_step "Stage 2: Building ONNX→TRT engines for audio processing..."
+
+    local modelscope_dir="${WORK_DIR}/CosyVoice2-0.5B"
+
+    if [[ ! -d "$modelscope_dir" ]]; then
+        log_error "ModelScope models not found. Run stage 0 first."
+        return 1
+    fi
+
+    # Build speech_tokenizer TRT (for audio_tokenizer)
+    # Input: mel (batch, 128, time) - variable time dimension
+    log_info "Building speech_tokenizer TRT engine..."
+    build_trt_engine \
+        "${modelscope_dir}/speech_tokenizer_v2.onnx" \
+        "${modelscope_dir}/speech_tokenizer_v2.fp16.trt" \
+        --fp16 \
+        "--minShapes=mel:1x128x10" \
+        "--optShapes=mel:1x128x500" \
+        "--maxShapes=mel:1x128x3000"
+
+    # Build campplus TRT (for speaker_embedding)
+    # Input: input (batch, time, 80) - variable time dimension
+    log_info "Building campplus TRT engine..."
+    build_trt_engine \
+        "${modelscope_dir}/campplus.onnx" \
+        "${modelscope_dir}/campplus.fp32.trt" \
+        --fp32 \
+        "--minShapes=input:1x4x80" \
+        "--optShapes=input:1x500x80" \
+        "--maxShapes=input:1x3000x80"
+
+    log_info "ONNX→TRT engines built successfully"
+}
+
+# =============================================================================
+# Stage 3: Create Model Repository
 # =============================================================================
 stage_create_model_repo() {
-    log_step "Stage 2: Creating Triton model repository..."
+    log_step "Stage 3: Creating Triton model repository..."
 
-    local cosyvoice_triton="${WORK_DIR}/CosyVoice/runtime/triton_trtllm/model_repo"
+    local model_templates="${COSYVOICE_TRITON}/model_repo"
 
-    if [[ ! -d "$cosyvoice_triton" ]]; then
-        log_error "CosyVoice model_repo templates not found"
-        log_error "Run stage -1 first to clone the repository"
+    if [[ ! -d "$model_templates" ]]; then
+        log_error "CosyVoice model_repo templates not found at: $model_templates"
         return 1
     fi
 
@@ -291,13 +317,13 @@ stage_create_model_repo() {
 
     # Copy model templates (all 7 models)
     log_info "Copying model templates..."
-    cp -r "${cosyvoice_triton}/cosyvoice2" "$MODEL_REPO/"
-    cp -r "${cosyvoice_triton}/cosyvoice2_dit" "$MODEL_REPO/"
-    cp -r "${cosyvoice_triton}/tensorrt_llm" "$MODEL_REPO/"
-    cp -r "${cosyvoice_triton}/token2wav" "$MODEL_REPO/"
-    cp -r "${cosyvoice_triton}/token2wav_dit" "$MODEL_REPO/"
-    cp -r "${cosyvoice_triton}/audio_tokenizer" "$MODEL_REPO/"
-    cp -r "${cosyvoice_triton}/speaker_embedding" "$MODEL_REPO/"
+    cp -r "${model_templates}/cosyvoice2" "$MODEL_REPO/"
+    cp -r "${model_templates}/cosyvoice2_dit" "$MODEL_REPO/"
+    cp -r "${model_templates}/tensorrt_llm" "$MODEL_REPO/"
+    cp -r "${model_templates}/token2wav" "$MODEL_REPO/"
+    cp -r "${model_templates}/token2wav_dit" "$MODEL_REPO/"
+    cp -r "${model_templates}/audio_tokenizer" "$MODEL_REPO/"
+    cp -r "${model_templates}/speaker_embedding" "$MODEL_REPO/"
 
     # Configuration paths (relative to /models/cosyvoice2_full in container)
     local engine_path="/models/cosyvoice2_full/tensorrt_llm/1/engine"
@@ -307,7 +333,7 @@ stage_create_model_repo() {
     # Fill templates
     log_info "Filling config templates..."
     (
-        cd "${WORK_DIR}/CosyVoice/runtime/triton_trtllm"
+        cd "${COSYVOICE_TRITON}"
 
         python3 scripts/fill_template.py -i "${MODEL_REPO}/token2wav/config.pbtxt" \
             "model_dir:${model_dir},triton_max_batch_size:${TRITON_MAX_BATCH_SIZE},max_queue_delay_microseconds:0"
@@ -351,23 +377,23 @@ stage_create_model_repo() {
 # Main
 # =============================================================================
 main() {
-    # Stage -1: Clone repo
-    if [[ $START_STAGE -le -1 && $STOP_STAGE -ge -1 ]]; then
-        stage_clone_repo
-    fi
-
     # Stage 0: Download models
     if [[ $START_STAGE -le 0 && $STOP_STAGE -ge 0 ]]; then
         stage_download_models
     fi
 
-    # Stage 1: Build engines
+    # Stage 1: Build TRT-LLM engines
     if [[ $START_STAGE -le 1 && $STOP_STAGE -ge 1 ]]; then
         stage_build_engines
     fi
 
-    # Stage 2: Create model repo
+    # Stage 2: Build ONNX→TRT engines
     if [[ $START_STAGE -le 2 && $STOP_STAGE -ge 2 ]]; then
+        stage_build_onnx_trt
+    fi
+
+    # Stage 3: Create model repo
+    if [[ $START_STAGE -le 3 && $STOP_STAGE -ge 3 ]]; then
         stage_create_model_repo
     fi
 
