@@ -304,11 +304,13 @@ build_trt_engine() {
     local engine_dir
     engine_dir=$(cd "$(dirname "$engine_path")" && pwd)
 
-    # Build trtexec command (TRT 25.x uses --memPoolSize instead of deprecated --workspace)
+    # Build trtexec command
     local trtexec_cmd="trtexec --onnx=/onnx/${onnx_name} --saveEngine=/engine/${engine_name}"
     [[ -n "$precision" ]] && trtexec_cmd+=" $precision"
-    # Use deprecated --workspace flag which is more reliable for setting workspace size in MiB
-    trtexec_cmd+=" --workspace=${mem_pool_size}"
+    # Convert MiB to GB for simpler parsing (round up)
+    local workspace_gb=$(( (mem_pool_size + 1023) / 1024 ))
+    [[ $workspace_gb -lt 1 ]] && workspace_gb=1
+    trtexec_cmd+=" --memPoolSize=workspace:${workspace_gb}G"
 
     for arg in "${shapes_args[@]}"; do
         trtexec_cmd+=" $arg"
