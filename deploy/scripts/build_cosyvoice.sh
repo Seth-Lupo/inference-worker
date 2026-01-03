@@ -310,37 +310,9 @@ stage_create_model_repo() {
         return 1
     fi
 
-    # Configuration paths (relative to /models/tts in container)
-    local engine_path="/models/tts/tensorrt_llm/1/engine"
-    local model_dir="/models/tts/assets"
-    local llm_tokenizer_dir="/models/tts/assets/cosyvoice2_llm"
-
-    # Fill templates
-    log_info "Filling config templates..."
-    (
-        cd "${COSYVOICE_SCRIPTS}"
-
-        python3 fill_template.py -i "${MODEL_REPO}/token2wav/config.pbtxt" \
-            "model_dir:${model_dir},triton_max_batch_size:${TRITON_MAX_BATCH_SIZE},max_queue_delay_microseconds:0"
-
-        python3 fill_template.py -i "${MODEL_REPO}/token2wav_dit/config.pbtxt" \
-            "model_dir:${model_dir},triton_max_batch_size:${TRITON_MAX_BATCH_SIZE},max_queue_delay_microseconds:0"
-
-        python3 fill_template.py -i "${MODEL_REPO}/cosyvoice2/config.pbtxt" \
-            "model_dir:${model_dir},bls_instance_num:${BLS_INSTANCE_NUM},llm_tokenizer_dir:${llm_tokenizer_dir},triton_max_batch_size:${TRITON_MAX_BATCH_SIZE},decoupled_mode:${DECOUPLED_MODE},max_queue_delay_microseconds:0"
-
-        python3 fill_template.py -i "${MODEL_REPO}/cosyvoice2_dit/config.pbtxt" \
-            "model_dir:${model_dir},bls_instance_num:${BLS_INSTANCE_NUM},llm_tokenizer_dir:${llm_tokenizer_dir},triton_max_batch_size:${TRITON_MAX_BATCH_SIZE},decoupled_mode:${DECOUPLED_MODE},max_queue_delay_microseconds:0"
-
-        python3 fill_template.py -i "${MODEL_REPO}/tensorrt_llm/config.pbtxt" \
-            "triton_backend:tensorrtllm,triton_max_batch_size:${TRITON_MAX_BATCH_SIZE},decoupled_mode:${DECOUPLED_MODE},max_beam_width:1,engine_dir:${engine_path},max_tokens_in_paged_kv_cache:2560,max_attention_window_size:2560,kv_cache_free_gpu_mem_fraction:0.5,exclude_input_in_output:True,enable_kv_cache_reuse:False,batching_strategy:inflight_fused_batching,max_queue_delay_microseconds:0,encoder_input_features_data_type:TYPE_FP16,logits_datatype:TYPE_FP32"
-
-        python3 fill_template.py -i "${MODEL_REPO}/audio_tokenizer/config.pbtxt" \
-            "model_dir:${model_dir},triton_max_batch_size:${TRITON_MAX_BATCH_SIZE},max_queue_delay_microseconds:0"
-
-        python3 fill_template.py -i "${MODEL_REPO}/speaker_embedding/config.pbtxt" \
-            "model_dir:${model_dir},triton_max_batch_size:${TRITON_MAX_BATCH_SIZE},max_queue_delay_microseconds:0"
-    )
+    # Note: Config files already have correct values set.
+    # Template filling is skipped - configs point to /models/tts/assets/
+    log_info "Configs already configured, skipping template filling..."
 
     # Copy assets
     log_info "Copying assets..."
