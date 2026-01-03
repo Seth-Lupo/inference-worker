@@ -135,3 +135,7 @@ parameters: {
   key: "executor_worker_path"
   value: { string_value: "/opt/tritonserver/backends/tensorrtllm/trtllmExecutorWorker" }
 }
+parameters: {
+  key: "tokenizer_dir"
+  value: { string_value: "/cosyvoice_build/cosyvoice2_llm" }
+}
