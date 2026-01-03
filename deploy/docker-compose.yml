@@ -35,20 +35,9 @@ services:
       - "8002:8002"   # Metrics
 
     volumes:
-      # Model repository (parakeet_tdt, qwen3_8b)
-      # Note: silero_vad runs locally in worker, not in Triton
-      - ./model_repository:/models:rw
-      # Mount built Qwen3 TensorRT-LLM engine
-      - ./qwen3_build/engine_int4:/models/qwen3_8b/1/engine:ro
-      # Mount CosyVoice2 full model repo (7 models with Python backends)
-      # Built by: ./scripts/build_cosyvoice.sh -1 2
-      # Note: rw needed for TensorRT engine caching
-      - ./model_repository/cosyvoice2_full:/models/cosyvoice2_full:rw
-      # Mount CosyVoice source for model classes (cosyvoice.llm, cosyvoice.flow, etc.)
-      - ./cosyvoice_build/CosyVoice:/opt/CosyVoice:ro
-      # Engine cache
+      - ./model_repository:/models
+      - ./cosyvoice_build/CosyVoice:/opt/CosyVoice
       - ./engine_cache:/engine_cache
-      # Logs
       - ./logs/triton:/var/log/triton
 
     environment:
@@ -94,9 +83,7 @@ services:
       - "80:80"
 
     volumes:
-      # Sync source code for development
-      - ../src:/app/src:ro
-      # Logs
+      - ../src:/app/src
       - ./logs/worker:/app/logs
 
     environment:

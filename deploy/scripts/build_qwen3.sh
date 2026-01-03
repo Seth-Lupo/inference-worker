@@ -250,12 +250,12 @@ setup_triton() {
 
     mkdir -p "${MODEL_REPO}/1"
 
-    # Link engine directory
+    # Copy engine directory
     if [[ -d "$engine_dir" ]]; then
-        rm -f "${MODEL_REPO}/1/engine"
-        ln -sf "$engine_dir" "${MODEL_REPO}/1/engine" || \
-            cp -r "$engine_dir" "${MODEL_REPO}/1/engine"
-        log_info "Engine linked"
+        rm -rf "${MODEL_REPO}/1/engine"
+        log_info "Copying engine files (this may take a moment)..."
+        cp -r "$engine_dir" "${MODEL_REPO}/1/engine"
+        log_info "Engine copied"
     fi
 
     # Copy tokenizer files
