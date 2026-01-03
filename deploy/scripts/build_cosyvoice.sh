@@ -275,15 +275,15 @@ stage_build_onnx_trt() {
     fi
 
     # Build speech_tokenizer TRT (for audio_tokenizer)
-    # Input: mel (batch, 128, time) - variable time dimension
+    # Input: feats (batch, 128, time) - variable time dimension
     log_info "Building speech_tokenizer engine..."
     build_trt_engine \
         "${modelscope_dir}/speech_tokenizer_v2.onnx" \
         "${modelscope_dir}/speech_tokenizer_v2.engine" \
         --fp16 \
-        "--minShapes=mel:1x128x10" \
-        "--optShapes=mel:1x128x500" \
-        "--maxShapes=mel:1x128x3000"
+        "--minShapes=feats:1x128x10" \
+        "--optShapes=feats:1x128x500" \
+        "--maxShapes=feats:1x128x3000"
 
     # Build campplus TRT (for speaker_embedding)
     # Input: input (batch, time, 80) - variable time dimension

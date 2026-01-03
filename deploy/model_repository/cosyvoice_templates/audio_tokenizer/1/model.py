@@ -118,7 +118,7 @@ class TrtS3Tokenizer:
         min_shape = [(1, 128, 10)]
         opt_shape = [(1, 128, 500)]
         max_shape = [(1, 128, 3000)]
-        input_names = ["mel"]
+        input_names = ["feats"]
         return {'min_shape': min_shape, 'opt_shape': opt_shape, 'max_shape': max_shape, 'input_names': input_names}
 
     def quantize(self, mels, mels_lens):
@@ -134,7 +134,7 @@ class TrtS3Tokenizer:
                 batch_size, n_mels, time_len = mels.shape
 
                 with stream:
-                    trt_context.set_input_shape('mel', (batch_size, n_mels, time_len))
+                    trt_context.set_input_shape('feats', (batch_size, n_mels, time_len))
                     # Output shape: (batch, time)
                     codes = torch.empty((batch_size, time_len), dtype=torch.int64, device=self.device)
 
