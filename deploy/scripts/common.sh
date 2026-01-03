@@ -247,8 +247,8 @@ require_gpu() {
 # TensorRT Engine Building
 # =============================================================================
 
-# Default container for TRT building
-readonly TRT_BUILD_IMAGE="${TRT_BUILD_IMAGE:-nvcr.io/nvidia/tritonserver:25.12-trtllm-python-py3}"
+# Default container for TRT building (TensorRT image has trtexec, Triton doesn't)
+readonly TRT_BUILD_IMAGE="${TRT_BUILD_IMAGE:-nvcr.io/nvidia/tensorrt:24.12-py3}"
 
 # Build TensorRT engine from ONNX model
 # Usage: build_trt_engine <onnx_path> <engine_path> [--fp16] [--int8] [--workspace=MB] [--min-shapes=...] [--opt-shapes=...] [--max-shapes=...]
@@ -301,37 +301,24 @@ build_trt_engine() {
     local engine_name
     engine_name=$(basename "$engine_path")
     local engine_dir
-    engine_dir="$(dirname "$engine_path")"
-    mkdir -p "$engine_dir"
-    engine_dir=$(cd "$engine_dir" && pwd)
+    engine_dir=$(cd "$(dirname "$engine_path")" && pwd)
 
-    # Build trtexec arguments
-    local trtexec_args="--onnx=/onnx/${onnx_name} --saveEngine=/engine/${engine_name}"
-    [[ -n "$precision" ]] && trtexec_args+=" $precision"
-    trtexec_args+=" --workspace=${workspace}"
+    # Build trtexec command
+    local trtexec_cmd="trtexec --onnx=/onnx/${onnx_name} --saveEngine=/engine/${engine_name}"
+    [[ -n "$precision" ]] && trtexec_cmd+=" $precision"
+    trtexec_cmd+=" --workspace=${workspace}"
 
     for arg in "${shapes_args[@]}"; do
-        trtexec_args+=" $arg"
+        trtexec_cmd+=" $arg"
     done
 
-    log_info "Running trtexec in container: $TRT_BUILD_IMAGE"
-
-    # Run in container - try trtexec from PATH first, then common locations
+    # Run in container
     docker run --rm --gpus all \
         --shm-size=4g \
         -v "${onnx_dir}:/onnx:ro" \
         -v "${engine_dir}:/engine" \
         "$TRT_BUILD_IMAGE" \
-        bash -c "
-            if command -v trtexec &>/dev/null; then
-                trtexec ${trtexec_args}
-            elif [[ -x /usr/src/tensorrt/bin/trtexec ]]; then
-                /usr/src/tensorrt/bin/trtexec ${trtexec_args}
-            else
-                echo 'ERROR: trtexec not found in container'
-                exit 1
-            fi
-        " || {
+        bash -c "$trtexec_cmd" || {
             log_error "trtexec failed for $(basename "$onnx_path")"
             return 1
         }
