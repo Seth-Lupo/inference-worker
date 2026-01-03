@@ -40,6 +40,7 @@ services:
       - ./engine_cache:/engine_cache
       - ./logs/triton:/var/log/triton
       - ./qwen3_build:/qwen3_build
+      - ./cosyvoice_build:/cosyvoice_build
 
     environment:
       - CUDA_VISIBLE_DEVICES=0
