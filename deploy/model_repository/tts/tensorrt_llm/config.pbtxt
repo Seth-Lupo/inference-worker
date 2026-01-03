@@ -143,3 +143,7 @@ parameters: {
   key: "xgrammar_tokenizer_info_path"
   value: { string_value: "" }
 }
+parameters: {
+  key: "guided_decoding_backend"
+  value: { string_value: "" }
+}
