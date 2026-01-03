@@ -46,7 +46,7 @@ parameters [
   },
   {
     key: "llm_tokenizer_dir"
-    value: {string_value: "/cosyvoice_build/CosyVoice2-0.5B"}
+    value: {string_value: "/cosyvoice_build/cosyvoice2_llm"}
   }
 ]
 
