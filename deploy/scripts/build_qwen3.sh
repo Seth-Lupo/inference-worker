@@ -15,23 +15,27 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/common.sh"
 
 # =============================================================================
-# Configuration
+# Configuration (from config.yaml, env vars override)
 # =============================================================================
-MODEL_NAME="${MODEL_NAME:-Qwen/Qwen3-8B}"
-MODEL_DIR_NAME="${MODEL_DIR_NAME:-Qwen3-8B}"
-QUANTIZATION="${QUANTIZATION:-int4}"
+MODEL_NAME="${MODEL_NAME:-$(cfg_get 'qwen3.hf_model' 'Qwen/Qwen3-8B')}"
+MODEL_DIR_NAME="${MODEL_DIR_NAME:-$(cfg_get 'qwen3.model_dir_name' 'Qwen3-8B')}"
+QUANTIZATION="${QUANTIZATION:-$(cfg_get 'qwen3.quantization' 'int4')}"
 
 # Build container (must match serving container for engine compatibility)
-TRTLLM_IMAGE="${TRTLLM_IMAGE:-nvcr.io/nvidia/tritonserver:25.12-trtllm-python-py3}"
+TRTLLM_IMAGE="${TRTLLM_IMAGE:-$(cfg_get 'images.trtllm' 'nvcr.io/nvidia/tritonserver:25.12-trtllm-python-py3')}"
 TRTLLM_CONTAINER_NAME="trtllm-builder-qwen3"
 
 # Engine build parameters
-MAX_BATCH_SIZE="${MAX_BATCH_SIZE:-8}"
-MAX_INPUT_LEN="${MAX_INPUT_LEN:-4096}"
-MAX_SEQ_LEN="${MAX_SEQ_LEN:-8192}"
+MAX_BATCH_SIZE="${MAX_BATCH_SIZE:-$(cfg_get 'qwen3.max_batch_size' '8')}"
+MAX_INPUT_LEN="${MAX_INPUT_LEN:-$(cfg_get 'qwen3.max_input_len' '4096')}"
+MAX_SEQ_LEN="${MAX_SEQ_LEN:-$(cfg_get 'qwen3.max_seq_len' '8192')}"
 
 # KV cache settings
-KV_CACHE_FREE_GPU_MEM_FRACTION="${KV_CACHE_FREE_GPU_MEM_FRACTION:-0.5}"
+KV_CACHE_FREE_GPU_MEM_FRACTION="${KV_CACHE_FREE_GPU_MEM_FRACTION:-$(cfg_get 'qwen3.kv_cache_free_gpu_mem_fraction' '0.5')}"
+
+# Triton paths
+TRITON_ENGINE_PATH="$(cfg_get 'qwen3.engine_path' '/models/llm/qwen3_8b/1/engine')"
+TRITON_TOKENIZER_PATH="$(cfg_get 'qwen3.tokenizer_path' '/models/llm/qwen3_8b/1/tokenizer')"
 
 # Paths
 readonly DEPLOY_DIR="$(get_deploy_dir)"
@@ -367,12 +371,12 @@ parameters {
 
 parameters {
   key: "gpt_model_path"
-  value: { string_value: "/models/llm/qwen3_8b/1/engine" }
+  value: { string_value: "${TRITON_ENGINE_PATH}" }
 }
 
 parameters {
   key: "tokenizer_dir"
-  value: { string_value: "/models/llm/qwen3_8b/1/tokenizer" }
+  value: { string_value: "${TRITON_TOKENIZER_PATH}" }
 }
 
 parameters {

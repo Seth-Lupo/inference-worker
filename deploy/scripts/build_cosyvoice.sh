@@ -39,19 +39,35 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/common.sh"
 
 # =============================================================================
-# Configuration
+# Configuration (from config.yaml, env vars override)
 # =============================================================================
-HF_MODEL="${HF_MODEL:-yuekai/cosyvoice2_llm}"
-MODELSCOPE_MODEL="${MODELSCOPE_MODEL:-iic/CosyVoice2-0.5B}"
+HF_MODEL="${HF_MODEL:-$(cfg_get 'cosyvoice.hf_model' 'yuekai/cosyvoice2_llm')}"
+MODELSCOPE_MODEL="${MODELSCOPE_MODEL:-$(cfg_get 'cosyvoice.modelscope_model' 'iic/CosyVoice2-0.5B')}"
 
-TRT_DTYPE="${TRT_DTYPE:-bfloat16}"
-TRTLLM_IMAGE="${TRTLLM_IMAGE:-nvcr.io/nvidia/tritonserver:25.12-trtllm-python-py3}"
+TRT_DTYPE="${TRT_DTYPE:-$(cfg_get 'cosyvoice.trt_dtype' 'bfloat16')}"
+TRTLLM_IMAGE="${TRTLLM_IMAGE:-$(cfg_get 'images.trtllm' 'nvcr.io/nvidia/tritonserver:25.12-trtllm-python-py3')}"
 TRTLLM_CONTAINER_NAME="trtllm-builder-cosyvoice"
 
 # Triton settings
-TRITON_MAX_BATCH_SIZE="${TRITON_MAX_BATCH_SIZE:-16}"
-BLS_INSTANCE_NUM="${BLS_INSTANCE_NUM:-4}"
-DECOUPLED_MODE="${DECOUPLED_MODE:-True}"
+TRITON_MAX_BATCH_SIZE="${TRITON_MAX_BATCH_SIZE:-$(cfg_get 'cosyvoice.max_batch_size' '16')}"
+BLS_INSTANCE_NUM="${BLS_INSTANCE_NUM:-$(cfg_get 'cosyvoice.bls_instance_count' '4')}"
+DECOUPLED_MODE="${DECOUPLED_MODE:-$(cfg_get 'cosyvoice.decoupled_mode' 'true')}"
+
+# Dynamic shapes from config
+SPEECH_TOKENIZER_MIN="$(cfg_get 'cosyvoice.shapes.speech_tokenizer.min' 'feats:1x128x10')"
+SPEECH_TOKENIZER_OPT="$(cfg_get 'cosyvoice.shapes.speech_tokenizer.opt' 'feats:1x128x500')"
+SPEECH_TOKENIZER_MAX="$(cfg_get 'cosyvoice.shapes.speech_tokenizer.max' 'feats:1x128x3000')"
+
+CAMPPLUS_MIN="$(cfg_get 'cosyvoice.shapes.campplus.min' 'input:1x4x80')"
+CAMPPLUS_OPT="$(cfg_get 'cosyvoice.shapes.campplus.opt' 'input:1x500x80')"
+CAMPPLUS_MAX="$(cfg_get 'cosyvoice.shapes.campplus.max' 'input:1x3000x80')"
+
+FLOW_DECODER_MIN="$(cfg_get 'cosyvoice.shapes.flow_decoder.min' 'x:2x80x4,mask:2x1x4,mu:2x80x4,cond:2x80x4')"
+FLOW_DECODER_OPT="$(cfg_get 'cosyvoice.shapes.flow_decoder.opt' 'x:2x80x500,mask:2x1x500,mu:2x80x500,cond:2x80x500')"
+FLOW_DECODER_MAX="$(cfg_get 'cosyvoice.shapes.flow_decoder.max' 'x:2x80x3000,mask:2x1x3000,mu:2x80x3000,cond:2x80x3000')"
+
+# Large workspace for flow decoder
+LARGE_WORKSPACE="$(cfg_get 'tensorrt.large_workspace_mib' '8192')"
 
 # Paths
 readonly DEPLOY_DIR="$(get_deploy_dir)"
@@ -281,9 +297,9 @@ stage_build_onnx_trt() {
         "${modelscope_dir}/speech_tokenizer_v2.onnx" \
         "${modelscope_dir}/speech_tokenizer_v2.engine" \
         --fp16 \
-        "--minShapes=feats:1x128x10" \
-        "--optShapes=feats:1x128x500" \
-        "--maxShapes=feats:1x128x3000"
+        "--minShapes=${SPEECH_TOKENIZER_MIN}" \
+        "--optShapes=${SPEECH_TOKENIZER_OPT}" \
+        "--maxShapes=${SPEECH_TOKENIZER_MAX}"
 
     # Build campplus TRT (for speaker_embedding)
     # Input: input (batch, time, 80) - variable time dimension
@@ -292,22 +308,22 @@ stage_build_onnx_trt() {
         "${modelscope_dir}/campplus.onnx" \
         "${modelscope_dir}/campplus.engine" \
         --fp32 \
-        "--minShapes=input:1x4x80" \
-        "--optShapes=input:1x500x80" \
-        "--maxShapes=input:1x3000x80"
+        "--minShapes=${CAMPPLUS_MIN}" \
+        "--optShapes=${CAMPPLUS_OPT}" \
+        "--maxShapes=${CAMPPLUS_MAX}"
 
     # Build flow decoder estimator TRT (for token2wav vocoder)
     # Inputs: x, mask, mu, cond - all with shape (batch, channels, time)
-    # Requires large workspace (~8GB) for optimization
+    # Requires large workspace for optimization
     log_info "Building flow decoder estimator engine (this takes ~5-10 minutes)..."
     build_trt_engine \
         "${modelscope_dir}/flow.decoder.estimator.fp32.onnx" \
         "${modelscope_dir}/flow.decoder.estimator.fp16.engine" \
         --fp16 \
-        "--workspace=8192" \
-        "--minShapes=x:2x80x4,mask:2x1x4,mu:2x80x4,cond:2x80x4" \
-        "--optShapes=x:2x80x500,mask:2x1x500,mu:2x80x500,cond:2x80x500" \
-        "--maxShapes=x:2x80x3000,mask:2x1x3000,mu:2x80x3000,cond:2x80x3000"
+        "--workspace=${LARGE_WORKSPACE}" \
+        "--minShapes=${FLOW_DECODER_MIN}" \
+        "--optShapes=${FLOW_DECODER_OPT}" \
+        "--maxShapes=${FLOW_DECODER_MAX}"
 
     log_info "ONNX→TRT engines built successfully"
 }

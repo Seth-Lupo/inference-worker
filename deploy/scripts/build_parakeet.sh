@@ -24,13 +24,19 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/common.sh"
 
 # =============================================================================
-# Configuration
+# Configuration (from config.yaml, env vars override)
 # =============================================================================
 readonly MODEL_NAME="parakeet_tdt"
-readonly HF_REPO="istupakov/parakeet-tdt-0.6b-v2-onnx"
+HF_REPO="${HF_REPO:-$(cfg_get 'parakeet.hf_repo' 'istupakov/parakeet-tdt-0.6b-v2-onnx')}"
 
 # TRT build settings
-TRT_PRECISION="${TRT_PRECISION:-fp16}"
+TRT_PRECISION="${TRT_PRECISION:-$(cfg_get 'parakeet.precision' 'fp16')}"
+MAX_BATCH_SIZE="${MAX_BATCH_SIZE:-$(cfg_get 'parakeet.max_batch_size' '8')}"
+
+# Dynamic shapes from config
+ENCODER_MIN_SHAPES="$(cfg_get 'parakeet.shapes.encoder.min' 'audio_signal:1x128x10,length:1')"
+ENCODER_OPT_SHAPES="$(cfg_get 'parakeet.shapes.encoder.opt' 'audio_signal:1x128x1000,length:1')"
+ENCODER_MAX_SHAPES="$(cfg_get 'parakeet.shapes.encoder.max' 'audio_signal:1x128x3000,length:1')"
 
 # Paths
 readonly DEPLOY_DIR="$(get_deploy_dir)"
@@ -141,9 +147,9 @@ stage_build_trt_engines() {
         "${ONNX_DIR}/encoder-model.onnx" \
         "${ENGINE_DIR}/encoder.engine" \
         "$precision_flag" \
-        "--minShapes=audio_signal:1x128x10,length:1" \
-        "--optShapes=audio_signal:1x128x1000,length:1" \
-        "--maxShapes=audio_signal:1x128x3000,length:1"
+        "--minShapes=${ENCODER_MIN_SHAPES}" \
+        "--optShapes=${ENCODER_OPT_SHAPES}" \
+        "--maxShapes=${ENCODER_MAX_SHAPES}"
 
     # Build decoder_joint (combined decoder and joiner)
     # Note: decoder_joint has mostly fixed shapes for autoregressive decoding
@@ -186,13 +192,13 @@ stage_create_model_repo() {
 create_triton_config() {
     log_info "Creating Triton configuration..."
 
-    cat > "${MODEL_DIR}/config.pbtxt" << 'EOF'
+    cat > "${MODEL_DIR}/config.pbtxt" << EOF
 # Parakeet TDT 0.6B V2 - Automatic Speech Recognition
 # Uses TensorRT engines for GPU inference with Python backend
 
 name: "parakeet_tdt"
 backend: "python"
-max_batch_size: 8
+max_batch_size: ${MAX_BATCH_SIZE}
 
 input [
   {

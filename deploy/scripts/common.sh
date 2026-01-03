@@ -8,6 +8,80 @@
 set -euo pipefail
 
 # =============================================================================
+# Configuration Loading
+# =============================================================================
+
+# Path to centralized config
+readonly CONFIG_FILE="${CONFIG_FILE:-$(dirname "${BASH_SOURCE[0]}")/../config.yaml}"
+
+# Get a value from config.yaml
+# Usage: cfg_get "qwen3.max_batch_size" [default_value]
+cfg_get() {
+    local key="$1"
+    local default="${2:-}"
+
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        echo "$default"
+        return
+    fi
+
+    # Use yq if available (fastest)
+    if command -v yq &>/dev/null; then
+        local val
+        val=$(yq -r ".${key} // \"\"" "$CONFIG_FILE" 2>/dev/null)
+        if [[ -n "$val" && "$val" != "null" ]]; then
+            echo "$val"
+            return
+        fi
+    # Fallback to Python (usually available)
+    elif command -v python3 &>/dev/null; then
+        local val
+        val=$(python3 -c "
+import yaml, sys
+try:
+    with open('$CONFIG_FILE') as f:
+        cfg = yaml.safe_load(f)
+    keys = '$key'.split('.')
+    val = cfg
+    for k in keys:
+        val = val.get(k) if isinstance(val, dict) else None
+        if val is None:
+            break
+    print(val if val is not None else '')
+except:
+    pass
+" 2>/dev/null)
+        if [[ -n "$val" && "$val" != "None" ]]; then
+            echo "$val"
+            return
+        fi
+    fi
+
+    echo "$default"
+}
+
+# Load config values into environment variables (only if not already set)
+# Usage: cfg_load_section "qwen3" "MAX_BATCH_SIZE:max_batch_size" "QUANTIZATION:quantization"
+cfg_load_section() {
+    local section="$1"
+    shift
+
+    for mapping in "$@"; do
+        local env_var="${mapping%%:*}"
+        local cfg_key="${mapping##*:}"
+
+        # Only set if not already defined
+        if [[ -z "${!env_var:-}" ]]; then
+            local val
+            val=$(cfg_get "${section}.${cfg_key}")
+            if [[ -n "$val" ]]; then
+                export "$env_var"="$val"
+            fi
+        fi
+    done
+}
+
+# =============================================================================
 # Colors and Logging
 # =============================================================================
 readonly RED='\033[0;31m'
@@ -248,7 +322,7 @@ require_gpu() {
 # =============================================================================
 
 # Default container for TRT building (TensorRT image has trtexec, Triton doesn't)
-readonly TRT_BUILD_IMAGE="${TRT_BUILD_IMAGE:-nvcr.io/nvidia/tensorrt:25.09-py3}"
+TRT_BUILD_IMAGE="${TRT_BUILD_IMAGE:-$(cfg_get 'images.tensorrt' 'nvcr.io/nvidia/tensorrt:25.09-py3')}"
 
 # Build TensorRT engine from ONNX model
 # Usage: build_trt_engine <onnx_path> <engine_path> [--fp16] [--int8] [--memPoolSize=MB] [--min-shapes=...] [--opt-shapes=...] [--max-shapes=...]
@@ -260,7 +334,8 @@ build_trt_engine() {
 
     # Parse options
     local precision="--fp16"
-    local mem_pool_size="4096"  # MiB
+    local mem_pool_size
+    mem_pool_size=$(cfg_get 'tensorrt.workspace_mib' '4096')
     local shapes_args=()
 
     while [[ $# -gt 0 ]]; do
