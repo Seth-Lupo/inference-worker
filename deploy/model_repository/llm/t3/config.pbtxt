@@ -1,0 +1,24 @@
+# T3 Turbo - Chatterbox Speech Token Generator
+# Uses Triton's native vLLM backend for high-performance inference
+#
+# This model generates speech tokens from text input.
+# Conditioning is pre-computed and baked into the model at load time.
+
+name: "t3"
+backend: "vllm"
+
+# vLLM manages GPU resources internally
+instance_group [
+  {
+    count: 1
+    kind: KIND_MODEL
+  }
+]
+
+# Enable custom metrics reporting
+parameters: {
+  key: "REPORT_CUSTOM_METRICS"
+  value: {
+    string_value: "true"
+  }
+}

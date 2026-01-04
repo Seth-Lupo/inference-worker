@@ -1,0 +1,21 @@
+# Qwen3-8B-AWQ via vLLM Backend
+# Serves the main reasoning LLM for the voice agent
+
+name: "qwen3"
+backend: "vllm"
+
+# vLLM manages GPU resources internally
+instance_group [
+  {
+    count: 1
+    kind: KIND_MODEL
+  }
+]
+
+# Enable custom metrics reporting
+parameters: {
+  key: "REPORT_CUSTOM_METRICS"
+  value: {
+    string_value: "true"
+  }
+}

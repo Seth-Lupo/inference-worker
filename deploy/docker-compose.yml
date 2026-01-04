@@ -4,23 +4,26 @@ version: "3.8"
 # Voice Agent Inference Stack
 #
 # Architecture:
-# - vLLM (Port 8000): Qwen3 for chat/reasoning
-# - vLLM (Port 8010): T3 for speech token generation (Chatterbox LM)
-# - Triton (Port 8001): Non-LLM models (encoder, decoder, embedding)
+# - Triton Inference Server with vLLM backend (all models in one server)
+#   - LLM: Qwen3-8B-AWQ (vLLM backend) - chat/reasoning
+#   - LLM: T3 Turbo (vLLM backend) - speech token generation
+#   - TTS: Chatterbox (Python backend) - calls T3 via gRPC, runs S3Gen locally
+#   - ASR: Parakeet (Python backend) - TensorRT
 # - Worker (Port 80): WebSocket server
 #
-# TensorRT Version Compatibility:
-# - Build and runtime use matching NGC container versions (24.12)
+# T3 runs as a native vLLM backend model (not wrapped in Python).
+# Chatterbox calls T3 via Triton gRPC for token generation.
+# Container: tritonserver:24.12-vllm-python-py3
 # =============================================================================
 
 services:
   # =============================================================================
-  # vLLM - Qwen3 (Main Reasoning LLM)
-  # API: OpenAI-compatible at port 8000
+  # Triton Inference Server (with vLLM Backend)
+  # Serves ALL models: LLMs via vLLM, TTS/ASR via Python/TensorRT
   # =============================================================================
-  vllm-qwen:
-    image: vllm/vllm-openai:latest
-    container_name: voice-agent-vllm-qwen
+  triton:
+    image: nvcr.io/nvidia/tritonserver:24.12-vllm-python-py3
+    container_name: voice-agent-triton
     restart: unless-stopped
 
     deploy:
@@ -37,130 +40,45 @@ services:
       stack: 67108864
 
     ports:
-      - "8000:8000"
-
-    volumes:
-      - ${HF_HOME:-~/.cache/huggingface}:/root/.cache/huggingface
-
-    environment:
-      - CUDA_VISIBLE_DEVICES=0
-      - HF_TOKEN=${HF_TOKEN}
-      - VLLM_ATTENTION_BACKEND=FLASHINFER
-
-    command: >
-      --model ${VLLM_MODEL:-Qwen/Qwen3-8B-AWQ}
-      --quantization awq
-      --dtype auto
-      --tensor-parallel-size 1
-      --max-model-len 8192
-      --gpu-memory-utilization 0.4
-      --enable-prefix-caching
-      --disable-log-requests
-      --port 8000
-
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 300s
-
-  # =============================================================================
-  # vLLM - T3 (Chatterbox Speech Token Generator)
-  # Serves the GPT2-style T3 model for text-to-speech-token generation
-  # API: OpenAI-compatible at port 8010
-  # =============================================================================
-  vllm-t3:
-    image: vllm/vllm-openai:latest
-    container_name: voice-agent-vllm-t3
-    restart: unless-stopped
-    profiles: ["t3"]  # Optional - enable with: docker compose --profile t3 up
-
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              device_ids: ["0"]
-              capabilities: [gpu]
-
-    shm_size: "8g"
-    ulimits:
-      memlock: -1
-      stack: 67108864
-
-    ports:
-      - "8010:8000"
-
-    volumes:
-      - ${HF_HOME:-~/.cache/huggingface}:/root/.cache/huggingface
-      - ./vllm_models/t3_turbo:/models/t3_turbo:ro
-
-    environment:
-      - CUDA_VISIBLE_DEVICES=0
-      - HF_TOKEN=${HF_TOKEN}
-
-    # T3 is ~350M params, uses less memory than Qwen3
-    command: >
-      --model /models/t3_turbo
-      --dtype float16
-      --tensor-parallel-size 1
-      --max-model-len 4096
-      --gpu-memory-utilization 0.3
-      --trust-remote-code
-      --disable-log-requests
-      --port 8000
-
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 120s
-
-  # =============================================================================
-  # Triton Inference Server
-  # Serves: Chatterbox non-LLM models (encoder, decoder, embeddings)
-  # If T3 profile is NOT enabled, also serves chatterbox_lm via ONNX Runtime
-  # =============================================================================
-  triton:
-    image: nvcr.io/nvidia/tritonserver:24.12-py3
-    container_name: voice-agent-triton
-    restart: unless-stopped
-
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              device_ids: ["0"]
-              capabilities: [gpu]
-
-    shm_size: "8g"
-    ulimits:
-      memlock: -1
-      stack: 67108864
-
-    ports:
-      - "8080:8000"   # HTTP
+      - "8000:8000"   # HTTP (OpenAI-compatible for vLLM models)
       - "8001:8001"   # gRPC
-      - "8082:8002"   # Metrics
+      - "8002:8002"   # Metrics
 
     volumes:
-      - ./model_repository:/models
+      # Model repositories
+      - ./model_repository/llm:/models/llm
+      - ./model_repository/tts:/models/tts
+      - ./model_repository/asr:/models/asr
+      # T3 weights (downloaded by build script, used by vLLM backend)
+      - ./models/t3_weights:/models/t3_weights:ro
+      # HuggingFace cache for Qwen3 download
+      - ${HF_HOME:-~/.cache/huggingface}:/root/.cache/huggingface
+      # Logs
       - ./logs/triton:/var/log/triton
 
     environment:
       - CUDA_VISIBLE_DEVICES=0
+      - HF_TOKEN=${HF_TOKEN}
       - TRT_LOGGER_LEVEL=WARNING
-      - VLLM_QWEN_URL=http://vllm-qwen:8000
-      - VLLM_T3_URL=http://vllm-t3:8000
+      # vLLM settings
+      - VLLM_ATTENTION_BACKEND=FLASHINFER
+      # Chatterbox settings (Python backend calls T3 via gRPC)
+      - TRITON_GRPC_URL=localhost:8001
+      - T3_MODEL_NAME=t3
+      # Progressive streaming for low first-chunk latency
+      - TTS_PROGRESSIVE_CHUNKS=4,8,16,32,32
+      - TTS_PROGRESSIVE_STEPS=1,2,5,7,10
+      - TTS_CHUNK_TOKENS=32
+      - S3GEN_DIFFUSION_STEPS=10
 
     command: >
       tritonserver
+      --model-repository=/models/llm
       --model-repository=/models/tts
       --model-repository=/models/asr
       --model-control-mode=explicit
+      --load-model=qwen3
+      --load-model=t3
       --load-model=chatterbox
       --load-model=parakeet_tdt
       --disable-auto-complete-config
@@ -174,14 +92,11 @@ services:
       interval: 30s
       timeout: 10s
       retries: 5
-      start_period: 120s
-
-    depends_on:
-      vllm-qwen:
-        condition: service_healthy
+      start_period: 300s
 
   # =============================================================================
   # Voice Agent Worker
+  # WebSocket server connecting to Triton for all inference
   # =============================================================================
   worker:
     build:
@@ -199,14 +114,18 @@ services:
       - ../voice.wav:/app/voice.wav:ro
 
     environment:
-      - VLLM_URL=http://vllm-qwen:8000
-      - LLM_MODEL=${VLLM_MODEL:-Qwen/Qwen3-8B-AWQ}
+      # All inference goes through Triton
       - TRITON_URL=triton:8001
-      - TRITON_HTTP_URL=http://triton:8080
+      - TRITON_HTTP_URL=http://triton:8000
+      # LLM model name (as registered in Triton)
+      - LLM_MODEL=qwen3
+      # TTS settings
       - TTS_BACKEND=chatterbox
       - TTS_MODEL=chatterbox
+      # Logging
       - LOG_LEVEL=INFO
       - PYTHONUNBUFFERED=1
+      # Voice cloning
       - REFERENCE_AUDIO_PATH=/app/voice.wav
       - REFERENCE_TEXT=The quick brown fox jumps over the lazy dog.
 
@@ -221,7 +140,8 @@ services:
       retries: 3
 
   # =============================================================================
-  # Model Builder
+  # Model Builder (TensorRT engine compilation)
+  # Usage: docker compose --profile build run model-builder
   # =============================================================================
   model-builder:
     image: nvcr.io/nvidia/tensorrt:24.12-py3
@@ -243,6 +163,7 @@ services:
 
     volumes:
       - ./model_repository:/models
+      - ./models:/models_src
       - ./scripts:/scripts:ro
       - ./chatterbox_build:/chatterbox_build
       - ./vllm_models:/vllm_models

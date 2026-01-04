@@ -1,0 +1,10 @@
+{
+    "model": "Qwen/Qwen3-8B-AWQ",
+    "quantization": "awq",
+    "dtype": "auto",
+    "tensor_parallel_size": 1,
+    "gpu_memory_utilization": 0.4,
+    "max_model_len": 8192,
+    "enable_prefix_caching": true,
+    "disable_log_stats": false
+}
