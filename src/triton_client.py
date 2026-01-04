@@ -141,7 +141,7 @@ class TritonClient:
         """
         Streaming inference for decoupled models.
 
-        Uses callback-based streaming for proper decoupled model support.
+        Uses the async client's stream_infer() for proper decoupled model support.
         """
         if not self._connected:
             await self.connect()
@@ -153,62 +153,37 @@ class TritonClient:
         triton_inputs = self._build_inputs(inputs)
         triton_outputs = [grpcclient.InferRequestedOutput(n) for n in output_names]
 
-        # Queue to collect streaming responses
-        response_queue: asyncio.Queue = asyncio.Queue()
-        stream_complete = asyncio.Event()
-        error_holder = [None]
-        response_count = [0]
+        result_count = 0
 
-        async def response_callback(result, error):
-            """Callback for streaming responses."""
-            if error:
-                logger.error(f"Triton: Stream callback error: {error}")
-                error_holder[0] = error
-                stream_complete.set()
-            elif result is None:
-                logger.debug(f"Triton: Stream complete signal received")
-                stream_complete.set()
-            else:
-                response_count[0] += 1
-                logger.debug(f"Triton: Received response #{response_count[0]}")
-                await response_queue.put(result)
-
-        # Start streaming context
-        logger.debug(f"Triton: Starting stream context...")
-        await self._client.start_stream(callback=response_callback)
+        # Build async request iterator for stream_infer
+        async def request_iterator():
+            yield {
+                "model_name": model_name,
+                "inputs": triton_inputs,
+                "outputs": triton_outputs,
+            }
 
         try:
-            # Send request
-            logger.debug(f"Triton: Sending async_stream_infer request...")
-            await self._client.async_stream_infer(
-                model_name=model_name,
-                inputs=triton_inputs,
-                outputs=triton_outputs,
+            # Use async stream_infer which returns an async generator
+            # Response is a tuple of (result, error)
+            response_iterator = self._client.stream_infer(
+                inputs_iterator=request_iterator(),
             )
-            logger.debug(f"Triton: Request sent, waiting for responses...")
 
-            # Yield results as they arrive
-            result_count = 0
-            while True:
+            async for response in response_iterator:
+                result, error = response
+
                 # Check for cancellation
                 if cancel_event and cancel_event.is_set():
                     logger.info(f"Triton: Stream cancelled by caller after {result_count} results")
+                    response_iterator.cancel()
                     break
 
-                # Check if stream is done
-                if stream_complete.is_set() and response_queue.empty():
-                    logger.debug(f"Triton: Stream complete, no more results")
-                    break
+                # Check for errors
+                if error is not None:
+                    raise RuntimeError(f"Stream error: {error}")
 
-                # Get next result with timeout
-                try:
-                    result = await asyncio.wait_for(
-                        response_queue.get(),
-                        timeout=0.1,
-                    )
-                except asyncio.TimeoutError:
-                    if stream_complete.is_set():
-                        break
+                if result is None:
                     continue
 
                 # Extract outputs
@@ -223,18 +198,15 @@ class TritonClient:
 
                 if outputs:
                     result_count += 1
+                    logger.debug(f"Triton: Yielding result #{result_count}")
                     yield InferenceResult(outputs=outputs, model_name=model_name)
-
-            # Check for errors
-            if error_holder[0]:
-                raise RuntimeError(f"Stream error: {error_holder[0]}")
 
             elapsed = (time.perf_counter() - stream_start) * 1000
             logger.info(f"Triton: Stream complete - {result_count} results in {elapsed:.0f}ms")
 
-        finally:
-            await self._client.stop_stream()
-            logger.debug(f"Triton: Stream stopped")
+        except Exception as e:
+            logger.error(f"Triton: Stream error: {e}")
+            raise
 
     async def __aenter__(self):
         await self.connect()

@@ -104,12 +104,12 @@ class CosyVoiceTTS:
 
         try:
             # Build inputs for CosyVoice2 BLS model
+            # Note: Streaming is controlled by server's decoupled mode, not a client input
             inputs = {
                 "target_text": np.array([[text]], dtype=object),
-                "stream": np.array([[self._config.streaming]], dtype=bool),
             }
 
-            logger.debug(f"CosyVoice: Inputs - target_text shape={inputs['target_text'].shape}, stream={self._config.streaming}")
+            logger.debug(f"CosyVoice: Inputs - target_text shape={inputs['target_text'].shape}")
 
             # Stream inference
             first_chunk = True
