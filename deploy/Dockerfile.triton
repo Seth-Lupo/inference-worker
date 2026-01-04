@@ -27,6 +27,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         git \
     && rm -rf /var/lib/apt/lists/*
 
+# Fix corrupted numpy metadata in base container
+RUN pip install --no-cache-dir --force-reinstall numpy
+
 # Install Triton client for BLS (Python backend calling other Triton models)
 RUN pip install --no-cache-dir tritonclient[grpc]
 
@@ -39,8 +42,8 @@ RUN mkdir -p /opt/tritonserver/backends/vllm && \
     cp -r /tmp/vllm_backend/src/* /opt/tritonserver/backends/vllm && \
     rm -rf /tmp/vllm_backend
 
-# Freeze torch to prevent later packages from changing it
-RUN pip freeze | grep -E "^(torch|nvidia)" > /tmp/frozen-packages.txt && \
+# Freeze torch and numpy to prevent later packages from changing them
+RUN pip freeze | grep -E "^(torch|nvidia|numpy)" > /tmp/frozen-packages.txt && \
     echo "=== Frozen packages ===" && \
     cat /tmp/frozen-packages.txt
 
@@ -70,6 +73,8 @@ RUN pip install --no-cache-dir --constraint /tmp/frozen-packages.txt onnxruntime
 
 # Verify installation
 RUN echo "=== Installed versions ===" && \
+    python3 -c "import numpy; print(f'numpy: {numpy.__version__}')" && \
     python3 -c "import torch; print(f'torch: {torch.__version__}')" && \
+    python3 -c "import transformers; print(f'transformers: {transformers.__version__}')" && \
     python3 -c "import vllm; print('vLLM import OK')" && \
     ls -la /opt/tritonserver/backends/vllm/
