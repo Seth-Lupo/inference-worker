@@ -13,7 +13,7 @@
 #
 # Use base Triton Python container - install vLLM ourselves for ABI compatibility
 # All packages from pip will have matching ABIs
-FROM nvcr.io/nvidia/tritonserver:25.04-py3
+FROM nvcr.io/nvidia/tritonserver:25.12-py3
 
 # Disable xformers to avoid triton kernel compatibility issues
 ENV XFORMERS_DISABLE_MEMORY_EFFICIENT_ATTENTION=1
@@ -36,12 +36,12 @@ RUN pip install --no-cache-dir --force-reinstall numpy
 # Install Triton client for BLS (Python backend calling other Triton models)
 RUN pip install --no-cache-dir tritonclient[grpc]
 
-# Install latest vLLM (for r25.12 backend compatibility)
+# Install latest vLLM
 RUN pip install --no-cache-dir vllm 
 
-# Install vLLM backend for Triton (r25.12 - latest release)
+# Install vLLM backend for Triton (main branch - compatible with latest vLLM)
 RUN mkdir -p /opt/tritonserver/backends/vllm && \
-    git clone --branch r25.12 --depth 1 https://github.com/triton-inference-server/vllm_backend.git /tmp/vllm_backend && \
+    git clone --depth 1 https://github.com/triton-inference-server/vllm_backend.git /tmp/vllm_backend && \
     cp -r /tmp/vllm_backend/src/* /opt/tritonserver/backends/vllm && \
     rm -rf /tmp/vllm_backend
 

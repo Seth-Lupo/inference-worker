@@ -10,7 +10,7 @@
 # -----------------------------------------------------------------------------
 images:
   # Triton container with vLLM + Python backends
-  triton: "nvcr.io/nvidia/tritonserver:25.05-vllm-python-py3"
+  triton: "nvcr.io/nvidia/tritonserver:25.12-vllm-python-py3"
 
 # -----------------------------------------------------------------------------
 # Triton Paths (as seen inside container)
