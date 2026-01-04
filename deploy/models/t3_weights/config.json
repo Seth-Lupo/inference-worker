@@ -1,10 +1,6 @@
 {
-    "architectures": ["T3ForCausalLM"],
-    "auto_map": {
-        "AutoConfig": "configuration_t3.T3Config",
-        "AutoModelForCausalLM": "modeling_t3.T3ForCausalLM"
-    },
-    "model_type": "t3",
+    "architectures": ["GPT2LMHeadModel"],
+    "model_type": "gpt2",
     "attention_bias": false,
     "attention_dropout": 0.0,
     "bos_token_id": 6561,
