@@ -11,9 +11,9 @@
 # Note: torchaudio removed - replaced with pure torch/librosa implementations
 # to avoid ABI compatibility issues with base image torch.
 #
-# 25.04 - using older version because 25.05 has vLLM ABI mismatch bug
-# (vLLM CUDA extension compiled against different PyTorch than shipped)
-FROM nvcr.io/nvidia/tritonserver:25.04-vllm-python-py3
+# Use base Triton Python container - install vLLM ourselves for ABI compatibility
+# All packages from pip will have matching ABIs
+FROM nvcr.io/nvidia/tritonserver:25.04-py3
 
 # Disable xformers to avoid triton kernel compatibility issues
 ENV XFORMERS_DISABLE_MEMORY_EFFICIENT_ATTENTION=1
@@ -24,16 +24,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         espeak-ng \
         libsndfile1 \
         ffmpeg \
+        git \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Triton client for BLS (Python backend calling other Triton models)
 RUN pip install --no-cache-dir tritonclient[grpc]
 
-# CRITICAL: Freeze torch/torchvision from the base image to prevent ANY reinstallation.
-# The NVIDIA container has a custom torch build - reinstalling from PyPI breaks vLLM ABI.
-# We create a constraints file that pins the exact versions, preventing pip from touching them.
-RUN pip freeze | grep -E "^(torch|torchvision|nvidia)" > /tmp/frozen-packages.txt && \
-    echo "=== Frozen packages (will not be modified) ===" && \
+# Install vLLM (this pulls compatible PyTorch automatically)
+RUN pip install --no-cache-dir vllm
+
+# Install vLLM backend for Triton
+RUN mkdir -p /opt/tritonserver/backends/vllm && \
+    git clone https://github.com/triton-inference-server/vllm_backend.git /tmp/vllm_backend && \
+    cp -r /tmp/vllm_backend/src/* /opt/tritonserver/backends/vllm && \
+    rm -rf /tmp/vllm_backend
+
+# Freeze torch to prevent later packages from changing it
+RUN pip freeze | grep -E "^(torch|nvidia)" > /tmp/frozen-packages.txt && \
+    echo "=== Frozen packages ===" && \
     cat /tmp/frozen-packages.txt
 
 # Install audio processing libraries
@@ -53,15 +61,15 @@ RUN pip install --no-cache-dir --constraint /tmp/frozen-packages.txt \
         conformer \
         s3tokenizer
 
-# Remove xformers to prevent triton kernel compatibility issues
-# Env vars alone don't prevent module-level imports in diffusers
+# Remove xformers if installed (causes triton kernel issues)
 RUN pip uninstall -y xformers || true
 
 # Install ONNX Runtime GPU for Parakeet ASR
 # Uses CUDA EP for GPU acceleration of ONNX models
 RUN pip install --no-cache-dir --constraint /tmp/frozen-packages.txt onnxruntime-gpu
 
-# Verify torch wasn't modified
-RUN echo "=== Final torch verification ===" && \
+# Verify installation
+RUN echo "=== Installed versions ===" && \
     python3 -c "import torch; print(f'torch: {torch.__version__}')" && \
-    python3 -c "import vllm; print('vLLM import OK')"
+    python3 -c "import vllm; print('vLLM import OK')" && \
+    ls -la /opt/tritonserver/backends/vllm/
