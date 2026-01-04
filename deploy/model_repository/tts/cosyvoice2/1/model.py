@@ -154,6 +154,10 @@ class TritonPythonModel:
             "runtime_top_p": np.array([[0.95]], dtype=np.float32),
             "runtime_top_k": np.array([[50]], dtype=np.int32),
             "temperature": np.array([[0.8]], dtype=np.float32),
+            # Add repetition penalty to prevent LLM from generating same token repeatedly
+            "repetition_penalty": np.array([[1.2]], dtype=np.float32),
+            "frequency_penalty": np.array([[0.5]], dtype=np.float32),
+            "presence_penalty": np.array([[0.5]], dtype=np.float32),
             "input_ids": input_ids,
             "input_lengths": np.array([[input_ids.shape[1]]], dtype=np.int32),
         }
@@ -335,12 +339,43 @@ class TritonPythonModel:
         speech_feat = speech_feat.unsqueeze(dim=0)
         return speech_feat
 
-    def _llm_gen_thread(self, generated_ids_iter, semantic_token_ids_arr, llm_is_done_flag):
+    def _llm_gen_thread(self, generated_ids_iter, semantic_token_ids_arr, llm_is_done_flag, llm_error_flag):
+        """LLM generation thread with degenerate sequence detection."""
+        consecutive_same = 0
+        last_token = None
+        max_consecutive_same = 50  # If same token 50 times in a row, something is wrong
+
         for generated_ids in generated_ids_iter:
             generated_ids = generated_ids.tolist()
             if len(generated_ids) == 0:
                 break
+
+            # Check for degenerate repetition
+            for token in generated_ids:
+                if token == last_token:
+                    consecutive_same += 1
+                    if consecutive_same >= max_consecutive_same:
+                        self.logger.log_error(
+                            f"LLM stuck in repetition loop: token {token} repeated {consecutive_same} times. "
+                            f"Total tokens so far: {len(semantic_token_ids_arr)}"
+                        )
+                        llm_error_flag[0] = True
+                        llm_is_done_flag[0] = True
+                        return
+                else:
+                    consecutive_same = 1
+                    last_token = token
+
             semantic_token_ids_arr.extend(generated_ids)
+
+            # Log periodically
+            if len(semantic_token_ids_arr) % 100 == 0:
+                unique_tokens = len(set(semantic_token_ids_arr[-100:]))
+                self.logger.log_info(
+                    f"LLM progress: {len(semantic_token_ids_arr)} tokens, "
+                    f"unique in last 100: {unique_tokens}"
+                )
+
         llm_is_done_flag[0] = True
 
     def execute(self, requests):
@@ -402,10 +437,11 @@ class TritonPythonModel:
 
                 semantic_token_ids_arr = []
                 llm_is_done_flag = [False]
+                llm_error_flag = [False]  # Track if LLM got stuck in repetition
 
                 llm_thread = threading.Thread(
                     target=self._llm_gen_thread,
-                    args=(generated_ids_iter, semantic_token_ids_arr, llm_is_done_flag)
+                    args=(generated_ids_iter, semantic_token_ids_arr, llm_is_done_flag, llm_error_flag)
                 )
 
                 llm_thread.start()
@@ -417,11 +453,26 @@ class TritonPythonModel:
                 while True:
                     pending_num = len(semantic_token_ids_arr) - token_offset
 
+                    # Check for LLM error (repetition detected)
+                    if llm_error_flag[0]:
+                        self.logger.log_error("Aborting TTS due to LLM repetition error")
+                        break
+
                     if llm_is_done_flag[0]:
                         break
 
                     if pending_num >= this_token_hop_len + self.flow_pre_lookahead_len:
                         this_tts_speech_token = semantic_token_ids_arr[:token_offset + this_token_hop_len + self.flow_pre_lookahead_len]
+
+                        # Check token diversity in the new chunk
+                        new_tokens = semantic_token_ids_arr[token_offset:token_offset + this_token_hop_len]
+                        unique_in_chunk = len(set(new_tokens))
+                        if unique_in_chunk == 1 and len(new_tokens) > 10:
+                            self.logger.log_warn(
+                                f"Low token diversity in chunk {chunk_index}: "
+                                f"{len(new_tokens)} tokens, all value {new_tokens[0]}"
+                            )
+
                         this_tts_speech_token = torch.tensor(this_tts_speech_token).unsqueeze(dim=0).to(torch.int32).to(self.device)
 
                         sub_tts_speech = self.forward_token2wav(
@@ -434,7 +485,7 @@ class TritonPythonModel:
                         response_sender.send(inference_response)
 
                         token_offset += this_token_hop_len
-                        self.logger.log_info(f"chunk_index: {chunk_index}, current_token_hop_len: {this_token_hop_len}")
+                        self.logger.log_info(f"chunk_index: {chunk_index}, token_hop_len: {this_token_hop_len}, unique_tokens: {unique_in_chunk}")
 
                         if self.dynamic_chunk_strategy == "exponential":
                             # For low latency, keep constant chunk size instead of growing
@@ -465,9 +516,12 @@ class TritonPythonModel:
                 # Process remaining tokens in chunks (same size limit applies)
                 # Only set finalize=True on the very last chunk
                 # CRITICAL: Ensure final chunk has enough tokens for hift (need ~50 mel frames = 25 tokens)
+                # Skip finalize if LLM had an error (repetition detected)
                 total_tokens = len(semantic_token_ids_arr)
-                remaining = total_tokens - token_offset
-                self.logger.log_info(f"finalize phase: total_tokens={total_tokens}, token_offset={token_offset}, remaining={remaining}")
+                if not llm_error_flag[0]:
+                    self.logger.log_info(f"finalize phase: total_tokens={total_tokens}, token_offset={token_offset}, remaining={total_tokens - token_offset}")
+                else:
+                    self.logger.log_error(f"Skipping finalize due to LLM error. Processed {token_offset} tokens before error.")
 
                 # Minimum tokens for hift to produce audio:
                 # - First chunk (no cache): needs ~50 mel frames = 25 tokens
@@ -475,7 +529,7 @@ class TritonPythonModel:
                 # Use 22 to be safe
                 min_final_tokens = 22
 
-                while token_offset < total_tokens:
+                while not llm_error_flag[0] and token_offset < total_tokens:
                     remaining = total_tokens - token_offset
 
                     # Process as final chunk if:
