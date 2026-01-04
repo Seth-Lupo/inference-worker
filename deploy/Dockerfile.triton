@@ -37,21 +37,13 @@ RUN pip install --no-cache-dir --force-reinstall numpy
 RUN pip install --no-cache-dir tritonclient[grpc]
 
 # Install latest vLLM (for r25.12 backend compatibility)
-RUN pip install --no-cache-dir vllm compressed-tensors
-
-# Install chatterbox-vllm for T3 speech token generation
-# This provides vLLM-compatible T3 model that auto-registers
-RUN pip install --no-cache-dir chatterbox-vllm
+RUN pip install --no-cache-dir vllm 
 
 # Install vLLM backend for Triton (r25.12 - latest release)
 RUN mkdir -p /opt/tritonserver/backends/vllm && \
     git clone --branch r25.12 --depth 1 https://github.com/triton-inference-server/vllm_backend.git /tmp/vllm_backend && \
     cp -r /tmp/vllm_backend/src/* /opt/tritonserver/backends/vllm && \
     rm -rf /tmp/vllm_backend
-
-# Patch vLLM backend to register ChatterboxT3 architecture on startup
-RUN sed -i '1i import chatterbox_vllm  # Register ChatterboxT3 with vLLM' \
-    /opt/tritonserver/backends/vllm/model.py
 
 # Freeze torch and numpy to prevent later packages from changing them
 RUN pip freeze | grep -E "^(torch|nvidia|numpy)" > /tmp/frozen-packages.txt && \
@@ -89,5 +81,4 @@ RUN echo "=== Installed versions ===" && \
     python3 -c "import transformers; print(f'transformers: {transformers.__version__}')" && \
     python3 -c "import vllm; print(f'vLLM: {vllm.__version__}')" && \
     python3 -c "import compressed_tensors; print(f'compressed-tensors: {compressed_tensors.__version__}')" && \
-    python3 -c "import chatterbox_vllm; print('chatterbox-vllm: OK (ChatterboxT3 registered)')" && \
     ls -la /opt/tritonserver/backends/vllm/
