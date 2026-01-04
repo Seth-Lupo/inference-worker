@@ -11,8 +11,9 @@
 # Note: torchaudio removed - replaced with pure torch/librosa implementations
 # to avoid ABI compatibility issues with base image torch.
 #
-# 25.05 requires Driver 575+ (compatible with Driver 580)
-FROM nvcr.io/nvidia/tritonserver:25.05-vllm-python-py3
+# 25.04 - using older version because 25.05 has vLLM ABI mismatch bug
+# (vLLM CUDA extension compiled against different PyTorch than shipped)
+FROM nvcr.io/nvidia/tritonserver:25.04-vllm-python-py3
 
 # Disable xformers to avoid triton kernel compatibility issues
 ENV XFORMERS_DISABLE_MEMORY_EFFICIENT_ATTENTION=1
