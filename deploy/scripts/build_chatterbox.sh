@@ -196,43 +196,48 @@ stage_download_models() {
     log_info "Checking out LFS files..."
     (
         cd "$clone_dir"
-        # Force checkout of LFS files
         git lfs checkout 2>/dev/null || true
-        # Alternative: smudge the files manually
-        git lfs pull --include="onnx/${LANGUAGE_MODEL_ONNX}*" 2>/dev/null || true
     )
 
     # Verify LFS files were downloaded (not just pointers)
-    local lm_file="${clone_dir}/onnx/${LANGUAGE_MODEL_ONNX}"
-    if [[ ! -f "$lm_file" ]]; then
-        log_warn "File not in expected location, checking LFS cache..."
-        # Try to find in LFS cache and copy
-        (
-            cd "$clone_dir"
-            git lfs ls-files -l 2>/dev/null | head -5
-        )
-        log_error "Expected file not found: $lm_file"
+    # Note: ONNX splits into .onnx (graph, small) and .onnx_data (weights, large)
+    # We check the _data file which contains the actual weights
+    local lm_data_file="${clone_dir}/onnx/${LANGUAGE_MODEL_ONNX}_data"
+    local lm_graph_file="${clone_dir}/onnx/${LANGUAGE_MODEL_ONNX}"
+
+    if [[ ! -f "$lm_graph_file" ]]; then
+        log_error "ONNX graph file not found: $lm_graph_file"
         return 1
     fi
 
-    local size
-    size=$(get_file_size "$lm_file")
-    if [[ "$size" -lt 1000000 ]]; then
-        log_warn "File appears to be LFS pointer (${size} bytes). Attempting manual checkout..."
+    if [[ ! -f "$lm_data_file" ]]; then
+        log_error "ONNX data file not found: $lm_data_file"
+        log_info "Available files:"
+        ls -la "${clone_dir}/onnx/" 2>/dev/null | head -20
+        return 1
+    fi
+
+    local graph_size data_size
+    graph_size=$(get_file_size "$lm_graph_file")
+    data_size=$(get_file_size "$lm_data_file")
+
+    # Data file should be > 100MB for the language model
+    if [[ "$data_size" -lt 100000000 ]]; then
+        log_warn "Data file appears to be LFS pointer (${data_size} bytes). Fetching..."
         (
             cd "$clone_dir"
-            # Force smudge of all ONNX files
-            find onnx -name "*.onnx*" -exec git lfs smudge < {} \; 2>/dev/null || true
-            git lfs checkout onnx/ 2>/dev/null || true
+            git lfs fetch --include="onnx/*_fp16.onnx_data" 2>/dev/null || git lfs fetch --all
+            git lfs checkout onnx/
         )
-        size=$(get_file_size "$lm_file")
-        if [[ "$size" -lt 1000000 ]]; then
-            log_error "Failed to checkout LFS files. Size: ${size} bytes"
+        data_size=$(get_file_size "$lm_data_file")
+        if [[ "$data_size" -lt 100000000 ]]; then
+            log_error "Failed to download LFS data files. Size: ${data_size} bytes"
             log_info "Try manually: cd ${clone_dir} && git lfs fetch --all && git lfs checkout"
             return 1
         fi
     fi
-    log_info "Language model size: $(numfmt --to=iec "$size" 2>/dev/null || echo "${size}B")"
+
+    log_info "Language model: graph=$(numfmt --to=iec "$graph_size" 2>/dev/null || echo "${graph_size}B"), data=$(numfmt --to=iec "$data_size" 2>/dev/null || echo "${data_size}B")"
 
     # Copy files to onnx_dir
     mkdir -p "$onnx_dir"
