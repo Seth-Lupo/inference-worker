@@ -247,28 +247,48 @@ class CosyVoice2Model:
         has_inf = torch.isinf(tts_mel).any().item()
         logging.info(f"token2wav flow output: mel shape={tts_mel.shape}, min={tts_mel.min().item():.4f}, max={tts_mel.max().item():.4f}, has_nan={has_nan}, has_inf={has_inf}")
         tts_mel = tts_mel[:, :, token_offset * self.flow.token_mel_ratio:]
+        logging.info(f"token2wav after slice: mel shape={tts_mel.shape}")
+
         # append hift cache
         if self.hift_cache_dict[uuid] is not None:
             hift_cache_mel, hift_cache_source = self.hift_cache_dict[uuid]['mel'], self.hift_cache_dict[uuid]['source']
+            logging.info(f"token2wav cache: mel={hift_cache_mel.shape}, source={hift_cache_source.shape}")
             tts_mel = torch.concat([hift_cache_mel, tts_mel], dim=2)
         else:
             hift_cache_source = torch.zeros(1, 1, 0)
+            logging.info(f"token2wav: no cache, starting fresh")
+
+        logging.info(f"token2wav hift input: mel shape={tts_mel.shape}, cache_source shape={hift_cache_source.shape}")
+
         # keep overlap mel and hift cache
         if finalize is False:
             tts_speech, tts_source = self.hift.inference(speech_feat=tts_mel, cache_source=hift_cache_source)
+            logging.info(f"token2wav hift raw output: speech shape={tts_speech.shape}, min={tts_speech.min().item():.4f}, max={tts_speech.max().item():.4f}")
+
             if self.hift_cache_dict[uuid] is not None:
-                tts_speech = fade_in_out(tts_speech, self.hift_cache_dict[uuid]['speech'], self.speech_window)
+                cached_speech = self.hift_cache_dict[uuid]['speech']
+                logging.info(f"token2wav before fade: cached_speech shape={cached_speech.shape}, min={cached_speech.min().item():.4f}, max={cached_speech.max().item():.4f}")
+                tts_speech = fade_in_out(tts_speech, cached_speech, self.speech_window)
+                logging.info(f"token2wav after fade: speech min={tts_speech.min().item():.4f}, max={tts_speech.max().item():.4f}")
+
             self.hift_cache_dict[uuid] = {'mel': tts_mel[:, :, -self.mel_cache_len:],
                                           'source': tts_source[:, :, -self.source_cache_len:],
                                           'speech': tts_speech[:, -self.source_cache_len:]}
             tts_speech = tts_speech[:, :-self.source_cache_len]
+            logging.info(f"token2wav after trim: speech shape={tts_speech.shape}, min={tts_speech.min().item():.4f}, max={tts_speech.max().item():.4f}")
         else:
             if speed != 1.0:
                 assert self.hift_cache_dict[uuid] is None, 'speed change only support non-stream inference mode'
                 tts_mel = F.interpolate(tts_mel, size=int(tts_mel.shape[2] / speed), mode='linear')
             tts_speech, tts_source = self.hift.inference(speech_feat=tts_mel, cache_source=hift_cache_source)
+            logging.info(f"token2wav FINALIZE hift raw: speech shape={tts_speech.shape}, min={tts_speech.min().item():.4f}, max={tts_speech.max().item():.4f}")
+
             if self.hift_cache_dict[uuid] is not None:
-                tts_speech = fade_in_out(tts_speech, self.hift_cache_dict[uuid]['speech'], self.speech_window)
+                cached_speech = self.hift_cache_dict[uuid]['speech']
+                logging.info(f"token2wav FINALIZE before fade: cached_speech min={cached_speech.min().item():.4f}, max={cached_speech.max().item():.4f}")
+                tts_speech = fade_in_out(tts_speech, cached_speech, self.speech_window)
+                logging.info(f"token2wav FINALIZE after fade: speech min={tts_speech.min().item():.4f}, max={tts_speech.max().item():.4f}")
+
         return tts_speech
 
 
