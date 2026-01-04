@@ -19,7 +19,7 @@ class LLMRail:
     """
     Mock LLM Rail that returns "This is LLM test" for any input.
 
-    In production, this would use Qwen 3 8B via Triton TensorRT-LLM.
+    In production, this uses Qwen3 4B INT4 via Triton vLLM backend.
     """
 
     def __init__(self):

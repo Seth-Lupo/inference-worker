@@ -1,5 +1,5 @@
 {
-    "model": "Qwen/Qwen3-8B-AWQ",
+    "model": "cpatonn/Qwen3-4B-Instruct-2507-AWQ-4bit",
     "quantization": "awq",
     "dtype": "auto",
     "tensor_parallel_size": 1,

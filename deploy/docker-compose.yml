@@ -5,7 +5,7 @@ version: "3.8"
 #
 # Architecture:
 # - Triton Inference Server with vLLM backend (all models in one server)
-#   - LLM: Qwen3-8B-AWQ (vLLM backend) - chat/reasoning
+#   - LLM: Qwen3-4B-AWQ (vLLM backend) - chat/reasoning
 #   - LLM: T3 Turbo (vLLM backend) - speech token generation
 #   - TTS: Chatterbox (Python backend) - calls T3 via gRPC, runs S3Gen locally
 #   - ASR: Parakeet (Python backend) - TensorRT

@@ -1,4 +1,4 @@
-# Qwen3-8B-AWQ via vLLM Backend
+# Qwen3-4B-Instruct-2507-AWQ-4bit via vLLM Backend
 # Serves the main reasoning LLM for the voice agent
 
 name: "qwen3"

@@ -3,25 +3,27 @@ Chatterbox Turbo TTS - Triton Python Backend
 
 Architecture:
 - T3 (Triton vLLM backend): Text -> speech tokens (uses pre-loaded conditioning)
-- S3Gen (local): Speech tokens -> audio waveform (flow matching + HiFiGAN)
+- Vocoder: Speech tokens -> audio waveform
+  - Option 1: TensorRT (conditional_decoder.engine) - fastest
+  - Option 2: S3Gen (safetensors) - PyTorch fallback
 
 This backend:
-1. Prepares S3Gen reference embeddings from reference audio (for voice cloning)
+1. Loads pre-compiled voice conditioning for T3 and vocoder
 2. Calls T3 via Triton gRPC (vLLM backend with pre-loaded conditioning)
-3. Decodes speech tokens to audio using S3Gen
+3. Decodes speech tokens to audio using TRT vocoder (or S3Gen fallback)
 4. Streams audio chunks progressively
 
 Progressive Streaming for Low Latency:
 - T3 generates all tokens first (vLLM handles efficiently)
 - Audio decoded in chunks: 4, 8, 16, 32, 32... tokens
-- Diffusion steps per chunk: 1, 2, 5, 7, 10... (fewer = faster)
+- Diffusion steps per chunk: 1, 2, 5, 7, 10... (fewer = faster, S3Gen only)
 """
 import json
 import os
 import sys
 import time
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Union
 
 import numpy as np
 import triton_python_backend_utils as pb_utils
@@ -29,6 +31,73 @@ import triton_python_backend_utils as pb_utils
 # Add chatterbox_tts to path
 MODEL_DIR = Path(__file__).parent
 sys.path.insert(0, str(MODEL_DIR))
+
+
+class TRTVocoder:
+    """TensorRT engine wrapper for conditional_decoder vocoder."""
+
+    def __init__(self, engine_path: str):
+        import tensorrt as trt
+        import torch
+
+        self.logger = trt.Logger(trt.Logger.WARNING)
+        self.runtime = trt.Runtime(self.logger)
+
+        with open(engine_path, "rb") as f:
+            self.engine = self.runtime.deserialize_cuda_engine(f.read())
+
+        self.context = self.engine.create_execution_context()
+        self.stream = torch.cuda.Stream()
+
+        # Get binding info
+        self.input_names = []
+        self.output_names = []
+        self.bindings = {}
+
+        for i in range(self.engine.num_io_tensors):
+            name = self.engine.get_tensor_name(i)
+            mode = self.engine.get_tensor_mode(name)
+            dtype = trt.nptype(self.engine.get_tensor_dtype(name))
+
+            if mode == trt.TensorIOMode.INPUT:
+                self.input_names.append(name)
+            else:
+                self.output_names.append(name)
+
+            self.bindings[name] = {"dtype": dtype}
+
+    def __call__(self, speech_tokens, speaker_embeddings, speaker_features):
+        """Run TRT vocoder inference."""
+        import torch
+
+        # Ensure inputs are on GPU as contiguous tensors
+        if not torch.is_tensor(speech_tokens):
+            speech_tokens = torch.from_numpy(speech_tokens)
+        if not torch.is_tensor(speaker_embeddings):
+            speaker_embeddings = torch.from_numpy(speaker_embeddings)
+        if not torch.is_tensor(speaker_features):
+            speaker_features = torch.from_numpy(speaker_features)
+
+        speech_tokens = speech_tokens.cuda().contiguous().to(torch.int64)
+        speaker_embeddings = speaker_embeddings.cuda().contiguous().to(torch.float32)
+        speaker_features = speaker_features.cuda().contiguous().to(torch.float32)
+
+        # Set input shapes and addresses
+        self.context.set_input_shape("speech_tokens", tuple(speech_tokens.shape))
+        self.context.set_tensor_address("speech_tokens", speech_tokens.data_ptr())
+        self.context.set_tensor_address("speaker_embeddings", speaker_embeddings.data_ptr())
+        self.context.set_tensor_address("speaker_features", speaker_features.data_ptr())
+
+        # Allocate output
+        out_shape = self.context.get_tensor_shape(self.output_names[0])
+        output = torch.empty(tuple(out_shape), dtype=torch.float32, device="cuda")
+        self.context.set_tensor_address(self.output_names[0], output.data_ptr())
+
+        # Execute
+        self.context.execute_async_v3(self.stream.cuda_stream)
+        self.stream.synchronize()
+
+        return output.cpu().numpy()
 
 
 class TritonPythonModel:
@@ -51,10 +120,12 @@ class TritonPythonModel:
         # Paths
         assets_dir = MODEL_DIR.parent / "chatterbox_assets"
         voices_dir = Path("/models/t3_weights/voices")  # Container path
+        engines_dir = MODEL_DIR / "engines"
 
         self.logger.log_info("Chatterbox Turbo: Initializing")
         self.logger.log_info(f"  Assets: {assets_dir}")
         self.logger.log_info(f"  Voices: {voices_dir}")
+        self.logger.log_info(f"  Engines: {engines_dir}")
 
         # Store constants
         self.SPEECH_VOCAB_SIZE = SPEECH_VOCAB_SIZE
@@ -67,38 +138,70 @@ class TritonPythonModel:
         self.t3_config = T3Config()
         self.SPEECH_TOKEN_OFFSET = 2500  # Same as in T3 model
 
-        # Load voice encoder (for reference audio embedding)
-        self.logger.log_info("  Loading VoiceEncoder...")
-        ve_weights = assets_dir / "ve.safetensors"
-        self.voice_encoder = VoiceEncoder()
-        if ve_weights.exists():
-            self.voice_encoder.load_state_dict(load_file(str(ve_weights)))
-        self.voice_encoder = self.voice_encoder.to(self.device).eval()
+        # Vocoder loading priority: TRT > S3Gen (safetensors)
+        self.vocoder_type = None  # 'trt' or 's3gen'
+        self.vocoder = None
 
-        # Load S3Gen vocoder
-        self.logger.log_info("  Loading S3Gen vocoder...")
-        s3gen_weights = assets_dir / "s3gen.safetensors"
-        self.s3gen = S3Gen(use_fp16=True)
-        if s3gen_weights.exists():
-            self.s3gen.load_state_dict(load_file(str(s3gen_weights)), strict=False)
-        self.s3gen = self.s3gen.to(self.device).eval()
+        # Try TensorRT first (fastest)
+        trt_vocoder_path = engines_dir / "conditional_decoder.engine"
+        if trt_vocoder_path.exists():
+            try:
+                self.logger.log_info(f"  Loading TensorRT vocoder: {trt_vocoder_path.name}")
+                self.vocoder = TRTVocoder(str(trt_vocoder_path))
+                self.vocoder_type = 'trt'
+                self.logger.log_info("  TensorRT vocoder loaded successfully")
+            except Exception as e:
+                self.logger.log_warn(f"  Failed to load TRT vocoder: {e}")
 
-        # Load default S3Gen conditionals
-        self.logger.log_info("  Loading default S3Gen conditionals...")
+        # Fall back to S3Gen (PyTorch safetensors)
+        if self.vocoder_type is None:
+            self.logger.log_info("  Loading S3Gen vocoder (safetensors)...")
+            s3gen_weights = assets_dir / "s3gen.safetensors"
+            self.s3gen = S3Gen(use_fp16=True)
+            if s3gen_weights.exists():
+                self.s3gen.load_state_dict(load_file(str(s3gen_weights)), strict=False)
+            self.s3gen = self.s3gen.to(self.device).eval()
+            self.vocoder_type = 's3gen'
+
+            # Load voice encoder (only needed for S3Gen path)
+            self.logger.log_info("  Loading VoiceEncoder...")
+            ve_weights = assets_dir / "ve.safetensors"
+            self.voice_encoder = VoiceEncoder()
+            if ve_weights.exists():
+                self.voice_encoder.load_state_dict(load_file(str(ve_weights)))
+            self.voice_encoder = self.voice_encoder.to(self.device).eval()
+
+        self.logger.log_info(f"  Vocoder: {self.vocoder_type.upper()}")
+
+        # Load default vocoder conditionals
+        self.logger.log_info("  Loading default vocoder conditionals...")
+        self.default_vocoder_cond = None
+        self.default_s3gen_ref = None
+
         conds_path = assets_dir / "conds.pt"
         if conds_path.exists():
             conds_data = torch.load(conds_path, weights_only=True)
-            self.default_s3gen_ref = conds_data['gen']
-            for k, v in self.default_s3gen_ref.items():
-                if torch.is_tensor(v):
-                    self.default_s3gen_ref[k] = v.to(self.device)
+            if self.vocoder_type == 'trt':
+                # For TRT vocoder, we need speaker_embeddings and speaker_features
+                # These should be pre-computed by speech_encoder during build
+                if 'vocoder' in conds_data:
+                    self.default_vocoder_cond = conds_data['vocoder']
+                    self.logger.log_info("  Loaded TRT vocoder conditioning from conds.pt")
+                else:
+                    self.logger.log_warn("  No TRT vocoder conditioning in conds.pt")
+            else:
+                # For S3Gen, use the 'gen' dict
+                self.default_s3gen_ref = conds_data.get('gen', {})
+                for k, v in self.default_s3gen_ref.items():
+                    if torch.is_tensor(v):
+                        self.default_s3gen_ref[k] = v.to(self.device)
         else:
-            self.default_s3gen_ref = None
-            self.logger.log_warn("  No default S3Gen conditionals found")
+            self.logger.log_warn("  No default conditionals found")
 
         # Load compiled voice conditionings
         self.logger.log_info("  Loading compiled voices...")
-        self.voices = {}
+        self.voices = {}  # T3 conditioning
+        self.vocoder_voices = {}  # TRT vocoder conditioning
         self.default_voice = "default"
 
         manifest_path = voices_dir / "voices.json"
@@ -110,9 +213,20 @@ class TritonPythonModel:
             for voice_name, voice_file in manifest.get("voices", {}).items():
                 voice_path = voices_dir / voice_file
                 if voice_path.exists():
-                    conditioning = torch.load(voice_path, weights_only=True)
-                    self.voices[voice_name] = conditioning.to(self.device)
-                    self.logger.log_info(f"    Loaded voice: {voice_name} ({conditioning.shape})")
+                    voice_data = torch.load(voice_path, weights_only=True)
+
+                    # Handle different conditioning formats
+                    if isinstance(voice_data, dict):
+                        # New format with both T3 and vocoder conditioning
+                        if 't3' in voice_data:
+                            self.voices[voice_name] = voice_data['t3'].to(self.device)
+                        if 'vocoder' in voice_data and self.vocoder_type == 'trt':
+                            self.vocoder_voices[voice_name] = voice_data['vocoder']
+                        self.logger.log_info(f"    Loaded voice: {voice_name} (dict format)")
+                    else:
+                        # Legacy format: just T3 conditioning tensor
+                        self.voices[voice_name] = voice_data.to(self.device)
+                        self.logger.log_info(f"    Loaded voice: {voice_name} ({voice_data.shape})")
 
         # Fallback: load conditioning.pt directly
         if not self.voices:
@@ -124,6 +238,8 @@ class TritonPythonModel:
 
         self.logger.log_info(f"  Available voices: {list(self.voices.keys())}")
         self.logger.log_info(f"  Default voice: {self.default_voice}")
+        if self.vocoder_type == 'trt':
+            self.logger.log_info(f"  Vocoder voices: {list(self.vocoder_voices.keys())}")
 
         # Triton client for T3
         triton_url = os.environ.get("TRITON_GRPC_URL", "localhost:8001")
@@ -171,34 +287,48 @@ class TritonPythonModel:
 
         return self.voices[voice_id]
 
-    def _prepare_s3gen_conditioning(self, ref_audio: Optional[np.ndarray] = None) -> dict:
-        """Prepare conditioning for S3Gen vocoder.
+    def _prepare_vocoder_conditioning(self, ref_audio: Optional[np.ndarray] = None, voice_id: Optional[str] = None) -> Union[dict, tuple]:
+        """Prepare conditioning for vocoder.
 
-        This prepares S3Gen reference embeddings for voice cloning in the vocoder.
+        Args:
+            ref_audio: Optional reference audio for voice cloning
+            voice_id: Voice ID for pre-compiled conditioning
 
         Returns:
-            s3gen_ref dict for vocoder
+            Either:
+                - dict (S3Gen): ref_dict with prompt_token, prompt_feat, embedding
+                - tuple (TRT): (speaker_embeddings, speaker_features)
         """
         import torch
 
-        if ref_audio is not None:
-            # Compute S3Gen reference embeddings from reference audio
-            import librosa
-
-            ref_16k = ref_audio.astype(np.float32)
-
-            # Get S3Gen reference embeddings for voice cloning
-            s3gen_ref_wav = librosa.resample(ref_16k, orig_sr=16000, target_sr=self.S3GEN_SR)
-            s3gen_ref = self.s3gen.embed_ref(s3gen_ref_wav, self.S3GEN_SR)
-
-            return s3gen_ref
-
+        if self.vocoder_type == 'trt':
+            # TRT vocoder needs speaker_embeddings and speaker_features
+            # These must be pre-computed (runtime computation not supported)
+            if voice_id and voice_id in self.vocoder_voices:
+                return self.vocoder_voices[voice_id]
+            elif self.default_vocoder_cond is not None:
+                return self.default_vocoder_cond
+            else:
+                raise RuntimeError("No TRT vocoder conditioning available. Run build with speech_encoder.")
         else:
-            # Use default conditioning
-            if self.default_s3gen_ref is None:
-                raise RuntimeError("No S3Gen conditioning available - load conds.pt")
+            # S3Gen path
+            if ref_audio is not None:
+                # Compute S3Gen reference embeddings from reference audio
+                import librosa
 
-            return self.default_s3gen_ref
+                ref_16k = ref_audio.astype(np.float32)
+
+                # Get S3Gen reference embeddings for voice cloning
+                s3gen_ref_wav = librosa.resample(ref_16k, orig_sr=16000, target_sr=self.S3GEN_SR)
+                s3gen_ref = self.s3gen.embed_ref(s3gen_ref_wav, self.S3GEN_SR)
+
+                return s3gen_ref
+            else:
+                # Use default conditioning
+                if self.default_s3gen_ref is None:
+                    raise RuntimeError("No S3Gen conditioning available - load conds.pt")
+
+                return self.default_s3gen_ref
 
     def _call_t3(self, text: str, conditioning: "torch.Tensor", stream: bool = False) -> List[int]:
         """Call T3 via Triton gRPC (vLLM backend).
@@ -276,10 +406,18 @@ class TritonPythonModel:
     def _decode_tokens_to_audio(
         self,
         speech_tokens,
-        s3gen_ref: dict,
+        vocoder_cond: Union[dict, tuple],
         n_timesteps: int = 10,
     ) -> np.ndarray:
-        """Convert speech tokens to audio using S3Gen."""
+        """Convert speech tokens to audio using vocoder.
+
+        Args:
+            speech_tokens: Speech token IDs
+            vocoder_cond: Either:
+                - dict (S3Gen): ref_dict with prompt_token, prompt_feat, embedding
+                - tuple (TRT): (speaker_embeddings, speaker_features)
+            n_timesteps: Diffusion steps (S3Gen only)
+        """
         import torch
 
         if isinstance(speech_tokens, list):
@@ -292,14 +430,24 @@ class TritonPythonModel:
         if len(speech_tokens) == 0:
             return np.zeros(0, dtype=np.float32)
 
-        with torch.inference_mode():
-            wav, _ = self.s3gen.inference(
-                speech_tokens=speech_tokens,
-                ref_dict=s3gen_ref,
-                n_timesteps=n_timesteps,
+        if self.vocoder_type == 'trt':
+            # TRT vocoder path
+            speaker_embeddings, speaker_features = vocoder_cond
+            wav = self.vocoder(
+                speech_tokens.unsqueeze(0) if speech_tokens.dim() == 1 else speech_tokens,
+                speaker_embeddings,
+                speaker_features,
             )
-
-        return wav.squeeze().cpu().numpy().astype(np.float32)
+            return wav.squeeze().astype(np.float32)
+        else:
+            # S3Gen path
+            with torch.inference_mode():
+                wav, _ = self.s3gen.inference(
+                    speech_tokens=speech_tokens,
+                    ref_dict=vocoder_cond,
+                    n_timesteps=n_timesteps,
+                )
+            return wav.squeeze().cpu().numpy().astype(np.float32)
 
     def execute(self, requests: List) -> List:
         """Process TTS requests."""
@@ -333,8 +481,8 @@ class TritonPythonModel:
                 # Get voice conditioning for T3
                 t3_conditioning = self._get_voice_conditioning(voice_id)
 
-                # Prepare S3Gen conditioning
-                s3gen_ref = self._prepare_s3gen_conditioning(ref_audio)
+                # Prepare vocoder conditioning (S3Gen dict or TRT tuple)
+                vocoder_cond = self._prepare_vocoder_conditioning(ref_audio, voice_id)
 
                 # Prepare text prompt
                 text_prompt = "[START]" + self.punc_norm(text) + "[STOP]"
@@ -343,12 +491,12 @@ class TritonPythonModel:
                     sender = request.get_response_sender()
                     self._generate_streaming(
                         sender, request_id, text_prompt,
-                        t3_conditioning, s3gen_ref, start_time
+                        t3_conditioning, vocoder_cond, start_time
                     )
                 else:
                     # Non-streaming: call T3, decode all, return
                     tokens = self._call_t3(text_prompt, t3_conditioning)
-                    audio = self._decode_tokens_to_audio(tokens, s3gen_ref)
+                    audio = self._decode_tokens_to_audio(tokens, vocoder_cond)
                     tensor = pb_utils.Tensor("audio", audio)
                     responses.append(pb_utils.InferenceResponse(output_tensors=[tensor]))
 
@@ -376,7 +524,7 @@ class TritonPythonModel:
         request_id: str,
         text_prompt: str,
         t3_conditioning: "torch.Tensor",
-        s3gen_ref: dict,
+        vocoder_cond: Union[dict, tuple],
         start_time: float
     ):
         """Generate with progressive streaming."""
@@ -408,7 +556,7 @@ class TritonPythonModel:
             chunk_tokens = tokens[token_pos:chunk_end]
 
             # Decode chunk
-            audio = self._decode_tokens_to_audio(chunk_tokens, s3gen_ref, n_timesteps=n_steps)
+            audio = self._decode_tokens_to_audio(chunk_tokens, vocoder_cond, n_timesteps=n_steps)
 
             if len(audio) > 0:
                 if first_audio_time is None:

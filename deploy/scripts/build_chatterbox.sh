@@ -67,11 +67,13 @@ fi
 
 # TensorRT dynamic shapes
 # Format: min,opt,max for each input
+# For multiple inputs, separate with space
 declare -A TRT_SHAPES=(
     ["embed_tokens"]="input_ids:1x1,input_ids:4x256,input_ids:8x1024"
     ["speech_encoder"]="input_features:1x80x100,input_features:1x80x500,input_features:1x80x3000"
+    ["conditional_decoder"]="speech_tokens:1x4,speech_tokens:1x32,speech_tokens:1x64"
 )
-# Note: conditional_decoder uses ONNX Runtime (multi-input vocoder)
+# Note: conditional_decoder uses progressive chunks 4,8,16,32,32 so min=4, opt=32, max=64
 
 # =============================================================================
 # Cleanup Handler
@@ -267,8 +269,16 @@ stage_build_engines() {
         ((failed++))
     fi
 
-    # conditional_decoder - skip TensorRT (multiple inputs, use ONNX Runtime)
-    log_info "  conditional_decoder: Using ONNX Runtime (multi-input vocoder)"
+    # conditional_decoder (vocoder: speech tokens -> audio)
+    if build_engine "conditional_decoder" \
+        "${ONNX_DIR}/${DECODER_ONNX}" \
+        "${engine_dir}/conditional_decoder.engine" \
+        "${TRT_SHAPES[conditional_decoder]}"; then
+        ((success++))
+    else
+        ((failed++))
+        log_info "  conditional_decoder: TRT failed, will use ONNX Runtime fallback"
+    fi
 
     echo ""
     log_info "TensorRT build complete: $success succeeded, $failed failed"

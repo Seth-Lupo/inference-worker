@@ -49,7 +49,7 @@ deploy/
 │
 ├── model_repository/       # Triton models (created by build scripts)
 │   ├── parakeet_tdt/       # ASR model
-│   ├── qwen3_8b/           # LLM model
+│   ├── qwen3/              # LLM model (vLLM)
 │   └── cosyvoice2_full/    # TTS models (7 submodels)
 │
 ├── cosyvoice_build/        # CosyVoice build artifacts
@@ -86,7 +86,7 @@ deploy/
 
 | Model | Type | Backend | GPU |
 |-------|------|---------|-----|
-| `qwen3_8b` | LLM | TensorRT-LLM | Yes |
+| `qwen3` | LLM | vLLM | Yes |
 | `parakeet_tdt` | ASR | Python (PyTorch) | Yes |
 | `cosyvoice2` | TTS Orchestrator | Python (BLS) | Yes |
 | `tensorrt_llm` | TTS LLM | TensorRT-LLM | Yes |

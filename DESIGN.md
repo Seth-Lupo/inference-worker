@@ -40,8 +40,8 @@ This document outlines the architecture for a high-performance, real-time voice 
 │  ┌─────────────┐  │               │                 │            │  ┌─────────────┐  │
 │  │ Silero VAD  │  │  user_text    │  ┌───────────┐  │ agent_text │  │ CosyVoice 2 │  │
 │  │  (1.8 MB)   │──┼──────────────►│  │  Qwen 3   │  │───────────►│  │  (0.5B)     │  │
-│  └─────────────┘  │               │  │   8B      │  │            │  └─────────────┘  │
-│  ┌─────────────┐  │               │  │  INT8     │  │            │        │         │
+│  └─────────────┘  │               │  │   4B      │  │            │  └─────────────┘  │
+│  ┌─────────────┐  │               │  │  INT4     │  │            │        │         │
 │  │ Parakeet    │  │               │  └───────────┘  │            │        ▼         │
 │  │ TDT 0.6B   │  │               │        │        │            │   audio_out      │
 │  └─────────────┘  │               │        ▼        │            │        │         │
@@ -57,7 +57,7 @@ This document outlines the architecture for a high-performance, real-time voice 
 │                        TRITON INFERENCE SERVER                              │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐ │
 │  │  Silero VAD  │  │  Parakeet    │  │   Qwen 3     │  │   CosyVoice 2    │ │
-│  │    (ONNX)    │  │  TDT 0.6B    │  │  8B INT8     │  │   (TensorRT)     │ │
+│  │    (ONNX)    │  │  TDT 0.6B    │  │  4B INT4     │  │   (TensorRT)     │ │
 │  │              │  │  (TensorRT)  │  │ (TensorRT)   │  │                  │ │
 │  └──────────────┘  └──────────────┘  └──────────────┘  └──────────────────┘ │
 └─────────────────────────────────────────────────────────────────────────────┘
@@ -210,20 +210,20 @@ class ASRRail:
 
 Processes transcribed user text and generates agent responses with tool-calling capability.
 
-#### Qwen 3 8B Specifications
+#### Qwen3 4B Specifications
 
-- **Architecture**: Dense transformer
-- **Parameters**: 8 billion
-- **Quantization**: INT8 SmoothQuant (W8A8)
-- **Context Window**: 32,768 tokens
-- **Features**: Hybrid reasoning, function calling
-- **Inference**: TensorRT-LLM with KV cache + in-flight batching
+- **Architecture**: Dense transformer with GQA (32 Q heads, 8 KV heads)
+- **Parameters**: 4 billion (3.6B non-embedding)
+- **Quantization**: AWQ INT4 (W4A16)
+- **Context Window**: 262,144 tokens (limited to 8,192 for memory efficiency)
+- **Features**: Instruction following, reasoning, function calling
+- **Inference**: vLLM with KV cache + in-flight batching
 
 #### Performance Optimizations
 
 | Optimization | Impact |
 |--------------|--------|
-| INT8 SmoothQuant | ~2x throughput, ~50% memory reduction |
+| AWQ INT4 | ~4x memory reduction vs FP16 |
 | KV Cache | Eliminates redundant computation |
 | In-flight Batching | Maximizes GPU utilization |
 | Streaming Output | Reduces time-to-first-token |
@@ -390,10 +390,10 @@ model_repository/
 │   ├── config.pbtxt
 │   └── 1/
 │       └── model.plan          # TensorRT engine
-├── qwen3_8b/
+├── qwen3/
 │   ├── config.pbtxt
 │   └── 1/
-│       └── model/              # TensorRT-LLM engine
+│       └── model.json          # vLLM config (HuggingFace model ID)
 └── cosyvoice2/
     ├── config.pbtxt
     └── 1/
@@ -403,9 +403,9 @@ model_repository/
 ### 5.2 Instance Configuration
 
 ```protobuf
-# Example: qwen3_8b/config.pbtxt
-name: "qwen3_8b"
-backend: "tensorrtllm"
+# Example: qwen3/config.pbtxt
+name: "qwen3"
+backend: "vllm"
 max_batch_size: 8
 
 instance_group [
@@ -485,10 +485,10 @@ async def handle_session(websocket: WebSocket, session_id: str):
 |-------|------------|-----------|-------------|
 | Silero VAD | ~50 MB | CPU only | Unlimited |
 | Parakeet TDT 0.6B | ~2 GB | 1 | Batched (8) |
-| Qwen 3 8B INT8 | ~10 GB | 1 | In-flight batching |
+| Qwen3 4B INT4 | ~3 GB | 1 | In-flight batching |
 | CosyVoice 2 | ~2 GB | 1 | Batched (4) |
 
-**Total GPU Memory**: ~14 GB (fits on single 16GB+ GPU)
+**Total GPU Memory**: ~7 GB (fits on single 8GB+ GPU)
 
 ### 6.3 Backpressure Handling
 
@@ -520,7 +520,7 @@ Target: **< 500ms** end-to-end (user silence → first audio byte)
 | Network (WebSocket) | 20-50ms | Depends on client location |
 | VAD Detection | < 5ms | Silero on CPU |
 | ASR Inference | 50-100ms | Parakeet streaming |
-| LLM TTFT | 150-200ms | Qwen 3 8B with batching |
+| LLM TTFT | 150-200ms | Qwen3 4B with batching |
 | TTS First Byte | 100-150ms | CosyVoice 2 streaming |
 | **Total** | **325-505ms** | Within budget |
 
