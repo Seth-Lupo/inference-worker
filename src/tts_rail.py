@@ -3,7 +3,7 @@ TTS Rail - Text-to-Speech abstraction with multiple backends.
 
 Supports:
 - MockTTSRail: Generates a beep for testing
-- ChatterboxTTSRail: Chatterbox Turbo via Triton Inference Server (TensorRT)
+- ChatterboxTTSRail: Chatterbox Turbo via Triton Inference Server
 """
 import logging
 import time
@@ -106,10 +106,10 @@ class MockTTSRail(BaseTTSRail):
 
 class ChatterboxTTSRail(BaseTTSRail):
     """
-    Chatterbox Turbo TTS via Triton Inference Server with TensorRT.
+    Chatterbox Turbo TTS via Triton Inference Server.
 
     Features:
-    - TensorRT-accelerated inference
+    - GPU-accelerated inference (PyTorch + torch.compile)
     - Streaming audio for low latency
     - Voice cloning via reference audio
     - Emotion exaggeration control

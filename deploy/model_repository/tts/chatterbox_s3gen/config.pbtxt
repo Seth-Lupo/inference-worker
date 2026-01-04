@@ -13,20 +13,17 @@ input [
     name: "speech_tokens"
     data_type: TYPE_INT64
     dims: [ -1 ]
-    description: "Speech token IDs from T3"
   },
   {
     name: "s3gen_conditioning"
     data_type: TYPE_UINT8
     dims: [ -1 ]
-    description: "Serialized S3Gen ref_dict from voice_encoder"
   },
   {
     name: "n_timesteps"
     data_type: TYPE_INT32
     dims: [ 1 ]
     optional: true
-    description: "Diffusion timesteps (default: 7)"
   }
 ]
 
@@ -35,13 +32,11 @@ output [
     name: "audio"
     data_type: TYPE_FP32
     dims: [ -1 ]
-    description: "Audio waveform samples"
   },
   {
     name: "sample_rate"
     data_type: TYPE_INT32
     dims: [ 1 ]
-    description: "Output sample rate (24000)"
   }
 ]
 

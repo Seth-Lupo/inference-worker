@@ -13,14 +13,12 @@ input [
     name: "reference_audio"
     data_type: TYPE_FP32
     dims: [ -1 ]
-    description: "Reference audio samples (16kHz mono float32)"
   },
   {
     name: "sample_rate"
     data_type: TYPE_INT32
     dims: [ 1 ]
     optional: true
-    description: "Sample rate of input audio (default: 16000)"
   }
 ]
 
@@ -29,7 +27,6 @@ output [
     name: "s3gen_conditioning"
     data_type: TYPE_UINT8
     dims: [ -1 ]
-    description: "Serialized S3Gen ref_dict (torch.save format)"
   }
 ]
 

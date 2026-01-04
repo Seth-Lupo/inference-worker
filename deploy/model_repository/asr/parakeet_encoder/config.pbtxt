@@ -1,11 +1,11 @@
-# Parakeet Encoder - Native TensorRT Backend
+# Parakeet Encoder - ONNX Runtime Python Backend
 # Converts mel spectrogram features to encoder hidden states
 #
-# Input: Mel features [batch, 128, time]
-# Output: Encoded features [batch, time/4, 512]
+# Input: Mel features [1, 128, time]
+# Output: Encoded features [1, time/4, 512]
 
 name: "parakeet_encoder"
-platform: "tensorrt_plan"
+backend: "python"
 max_batch_size: 0
 
 input [
@@ -42,12 +42,9 @@ instance_group [
   }
 ]
 
-# TensorRT optimization profile
-optimization {
-  cuda {
-    graphs: true
-    busy_wait_events: true
-  }
+parameters {
+  key: "ONNX_DIR"
+  value: { string_value: "/models/asr/parakeet_onnx" }
 }
 
 version_policy: { latest: { num_versions: 1 } }

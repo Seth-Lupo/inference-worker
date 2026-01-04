@@ -8,21 +8,22 @@ version: "3.8"
 #   - LLM: Qwen3-4B-AWQ (vLLM backend) - chat/reasoning
 #   - LLM: T3 Turbo (vLLM backend) - speech token generation
 #   - TTS: Chatterbox (Python backend) - calls T3 via gRPC, runs S3Gen locally
-#   - ASR: Parakeet (BLS + native TensorRT backends)
+#   - ASR: Parakeet (BLS + ONNX Runtime GPU backends)
 # - Worker (Port 80): WebSocket server
 #
 # T3 runs as a native vLLM backend model (not wrapped in Python).
 # Chatterbox calls T3 via Triton gRPC for token generation.
-# Container: tritonserver:25.12-vllm-python-py3
+# Parakeet uses ONNX Runtime GPU for encoder/decoder inference.
+# Container: tritonserver:25.05-vllm-python-py3 (requires Driver 575+)
 # =============================================================================
 
 services:
   # =============================================================================
   # Triton Inference Server (with vLLM Backend)
-  # Serves ALL models: LLMs via vLLM, TTS/ASR via Python/TensorRT
+  # Serves ALL models: LLMs via vLLM, TTS/ASR via Python backends
   # =============================================================================
   triton:
-    image: nvcr.io/nvidia/tritonserver:25.12-vllm-python-py3
+    image: nvcr.io/nvidia/tritonserver:25.05-vllm-python-py3
     container_name: voice-agent-triton
     restart: unless-stopped
     build:
@@ -64,7 +65,6 @@ services:
     environment:
       - CUDA_VISIBLE_DEVICES=0
       - HF_TOKEN=${HF_TOKEN}
-      - TRT_LOGGER_LEVEL=WARNING
       # vLLM settings
       - VLLM_ATTENTION_BACKEND=FLASHINFER
       # Chatterbox settings (Python backend calls T3 via gRPC)
@@ -149,46 +149,6 @@ services:
       interval: 10s
       timeout: 5s
       retries: 3
-
-  # =============================================================================
-  # Model Builder (TensorRT engine compilation)
-  # Usage: docker compose --profile build run model-builder
-  # =============================================================================
-  model-builder:
-    image: nvcr.io/nvidia/tensorrt:24.09-py3
-    container_name: voice-agent-model-builder
-    profiles: ["build"]
-
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
-
-    shm_size: "8g"
-    ulimits:
-      memlock: -1
-      stack: 67108864
-
-    volumes:
-      - ./model_repository:/models
-      - ./models:/models_src
-      - ./scripts:/scripts:ro
-      - ./chatterbox_build:/chatterbox_build
-      - ./vllm_models:/vllm_models
-      - ${HF_HOME:-~/.cache/huggingface}:/root/.cache/huggingface
-
-    working_dir: /scripts
-
-    environment:
-      - HF_TOKEN=${HF_TOKEN}
-      - CUDA_VISIBLE_DEVICES=0
-
-    command: ["bash"]
-    stdin_open: true
-    tty: true
 
 networks:
   default:

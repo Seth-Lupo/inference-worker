@@ -6,32 +6,11 @@
 # =============================================================================
 
 # -----------------------------------------------------------------------------
-# Docker Images - MUST USE MATCHING VERSIONS
+# Docker Images
 # -----------------------------------------------------------------------------
-# TensorRT version compatibility is critical:
-# - Build and runtime containers must have the same TensorRT version
-# - Using NGC 24.12 series for all containers
 images:
-  # TensorRT container for ONNX->TRT builds (trtexec)
-  tensorrt: "nvcr.io/nvidia/tensorrt:24.09-py3"
-
-  # Triton container for serving (must match TRT version)
-  triton: "nvcr.io/nvidia/tritonserver:25.08-py3"
-
-
-
-# -----------------------------------------------------------------------------
-# TensorRT Build Settings
-# -----------------------------------------------------------------------------
-tensorrt:
-  # Default workspace memory in MiB
-  workspace_mib: 4096
-
-  # Large model workspace (flow decoder, etc.)
-  large_workspace_mib: 8192
-
-  # Default precision for TRT engine builds
-  default_precision: "fp16"
+  # Triton container with vLLM + Python backends
+  triton: "nvcr.io/nvidia/tritonserver:25.05-vllm-python-py3"
 
 # -----------------------------------------------------------------------------
 # Triton Paths (as seen inside container)

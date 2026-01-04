@@ -56,9 +56,9 @@ This document outlines the architecture for a high-performance, real-time voice 
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                        TRITON INFERENCE SERVER                              │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐ │
-│  │  Silero VAD  │  │  Parakeet    │  │   Qwen 3     │  │   CosyVoice 2    │ │
-│  │    (ONNX)    │  │  TDT 0.6B    │  │  4B INT4     │  │   (TensorRT)     │ │
-│  │              │  │  (TensorRT)  │  │ (TensorRT)   │  │                  │ │
+│  │  Silero VAD  │  │  Parakeet    │  │   Qwen 3     │  │   Chatterbox     │ │
+│  │    (ONNX)    │  │  TDT 0.6B    │  │  4B AWQ      │  │   TTS (PyTorch)  │ │
+│  │              │  │ (ONNX RT)    │  │   (vLLM)     │  │                  │ │
 │  └──────────────┘  └──────────────┘  └──────────────┘  └──────────────────┘ │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -288,15 +288,14 @@ class ToolDefinition:
 
 Converts agent text responses to streaming audio output.
 
-#### CosyVoice 2 Specifications
+#### Chatterbox TTS Specifications
 
-- **Architecture**: Text-Speech LLM based on Qwen2.5-0.5B
-- **Parameters**: 0.5 billion
-- **Modes**: Streaming and non-streaming unified model
-- **First Packet Latency**: ~150ms (streaming mode)
-- **Acceleration**: 4x speedup with TensorRT-LLM
-- **Features**: Voice cloning, emotion control, multilingual
-- **Optimizations**: KV cache + SDPA for streaming
+- **Architecture**: T3 speech token LLM + S3Gen flow decoder
+- **T3 Backend**: vLLM for speech token generation
+- **S3Gen Backend**: PyTorch with torch.compile()
+- **First Packet Latency**: ~200ms (streaming mode)
+- **Features**: Voice cloning, emotion control
+- **Optimizations**: Progressive streaming with variable chunk sizes
 
 #### Interface
 
@@ -386,18 +385,24 @@ model_repository/
 │   ├── config.pbtxt
 │   └── 1/
 │       └── model.onnx
-├── parakeet_tdt/
+├── parakeet_tdt/              # ASR orchestrator (Python BLS)
 │   ├── config.pbtxt
 │   └── 1/
-│       └── model.plan          # TensorRT engine
+│       └── model.py
+├── parakeet_encoder/          # ONNX Runtime backend
+│   └── 1/model.py
+├── parakeet_decoder/          # ONNX Runtime backend
+│   └── 1/model.py
 ├── qwen3/
 │   ├── config.pbtxt
 │   └── 1/
-│       └── model.json          # vLLM config (HuggingFace model ID)
-└── cosyvoice2/
+│       └── model.json          # vLLM config
+├── t3/                         # Speech token generator (vLLM)
+│   └── 1/model.json
+└── chatterbox/                 # TTS orchestrator (Python BLS)
     ├── config.pbtxt
     └── 1/
-        └── model/              # TensorRT-LLM engine
+        └── model.py
 ```
 
 ### 5.2 Instance Configuration

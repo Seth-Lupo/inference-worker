@@ -3,27 +3,36 @@ This service advertises voice agents. The calls are stateful connections.
 THIS SHOULD BE ABLE TO HANDLE CONCURRENCY.
 
 Parts:
-Orchestrator: The orchestrator advertises to the outside world. When a client 
+Orchestrator: The orchestrator advertises to the outside world. When a client
 requests them, they set up a connection. This connection is interfaced via websockets.
 It constantly recieves sounds and constantly emits sounds. It also also emits tool_requests
 and receives tool responses.
 
 When a connection is made, you create a AgentRail with three main models.
-ASRRail, LLMRail, and TTSRail. 
+ASRRail, LLMRail, and TTSRail.
 
 ASRRail directly takes in audio and emits words. It also controls user_speaking (whether or not the user speaking). runs speech to text and vad
-LLMRail currently intakes user_text and emits agent_text. it also emits a tool_request and recieves tool_response. 
+LLMRail currently intakes user_text and emits agent_text. it also emits a tool_request and recieves tool_response.
 
-the TTSRail basically streams in the output_text and streams_out audio, this is the audio being sent back. 
+the TTSRail basically streams in the output_text and streams_out audio, this is the audio being sent back.
 Also, the streaming out of audio can be interrupted by the ASRRails user_speaking state to make the model stop speaking.
 
-ALL inference will be done of triton inference server. I will use silero vad vor Vad. i will use Parakeet tdt 0.6B V2 FP16 I will use qwen 3 8B int8 tensorRT LLM. also i will be using TEnsorRT LLM for cosy voice 2, which has support accordin got official repo.
-All inference that uses GPU will be on triton. 
+ALL inference will be done of triton inference server.
+- Silero VAD for voice activity detection
+- Parakeet TDT 0.6B V2 (ONNX Runtime) for ASR
+- Qwen3 4B AWQ (vLLM) for LLM
+- Chatterbox TTS (PyTorch + torch.compile) for TTS
+
+All inference uses GPU via Triton Python and vLLM backends.
 
 Write code like steve jobs. Be modular. Use dependency injection. Note that we will be serving users concurrently, and latency matters.
-10.14.1
-  --load-model=cosyvoice2
-      --load-model=audio_tokenizer
-      --load-model=speaker_embedding
-      --load-model=tensorrt_llm
-      --load-model=token2wav
+
+Models loaded:
+  --load-model=qwen3
+  --load-model=t3
+  --load-model=chatterbox
+  --load-model=chatterbox_voice_encoder
+  --load-model=chatterbox_s3gen
+  --load-model=parakeet_encoder
+  --load-model=parakeet_decoder
+  --load-model=parakeet_tdt

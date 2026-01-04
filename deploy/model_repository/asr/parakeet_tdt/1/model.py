@@ -2,8 +2,8 @@
 Parakeet TDT 0.6B V2 - BLS Orchestrator
 
 Business Logic Scripting model that orchestrates:
-- parakeet_encoder (native TensorRT backend)
-- parakeet_decoder (native TensorRT backend)
+- parakeet_encoder (ONNX Runtime Python backend)
+- parakeet_decoder (ONNX Runtime Python backend)
 
 This Python model only handles:
 1. Audio preprocessing (mel spectrogram)
@@ -11,8 +11,7 @@ This Python model only handles:
 3. Autoregressive decoding loop calling decoder
 4. Token to text conversion
 
-The heavy compute (encoder, decoder) runs on native TensorRT backends
-for maximum performance.
+The encoder/decoder run as ONNX models with GPU acceleration via ONNX Runtime.
 """
 import os
 import json
@@ -21,7 +20,7 @@ import triton_python_backend_utils as pb_utils
 
 
 class TritonPythonModel:
-    """Parakeet TDT ASR - BLS orchestrating native TRT backends."""
+    """Parakeet TDT ASR - BLS orchestrating ONNX Runtime backends."""
 
     def initialize(self, args):
         """Load vocabulary and prepare for inference."""
@@ -31,7 +30,7 @@ class TritonPythonModel:
         model_dir = os.path.dirname(os.path.realpath(__file__))
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.dtype = torch.float16  # Match TRT engine precision
+        self.dtype = torch.float16  # Match ONNX model precision
 
         pb_utils.Logger.log_info(f"Parakeet BLS: Initializing")
         pb_utils.Logger.log_info(f"  Model dir: {model_dir}")
@@ -61,7 +60,7 @@ class TritonPythonModel:
         # LSTM hidden size for decoder states
         self.hidden_size = 640
 
-        pb_utils.Logger.log_info("Parakeet BLS: Initialized - ready to call native TRT backends")
+        pb_utils.Logger.log_info("Parakeet BLS: Initialized - ready to call ONNX Runtime backends")
 
     def _load_vocab(self, path):
         """Load token vocabulary."""
@@ -130,7 +129,7 @@ class TritonPythonModel:
         return mel_spec.unsqueeze(0).to(self.dtype)
 
     def execute(self, requests):
-        """Run inference using BLS to call native TRT backends."""
+        """Run inference using BLS to call ONNX Runtime backends."""
         import torch
 
         responses = []
@@ -157,17 +156,17 @@ class TritonPythonModel:
         return responses
 
     def _transcribe_bls(self, audio):
-        """Transcribe using BLS calls to native TRT backends."""
+        """Transcribe using BLS calls to ONNX Runtime backends."""
         import torch
 
         # Step 1: Compute mel features (lightweight, stays in Python)
         features = self._compute_features(audio)  # (1, 128, time)
         seq_len = features.shape[2]
 
-        # Step 2: Call encoder via BLS (native TRT backend)
+        # Step 2: Call encoder via BLS (ONNX Runtime backend)
         encoder_out, encoder_len = self._call_encoder(features, seq_len)
 
-        # Step 3: Autoregressive decoding loop (calls native TRT decoder)
+        # Step 3: Autoregressive decoding loop (calls ONNX Runtime decoder)
         tokens = self._greedy_decode_bls(encoder_out)
 
         # Step 4: Convert tokens to text
@@ -210,7 +209,7 @@ class TritonPythonModel:
         return encoder_out, encoder_len
 
     def _greedy_decode_bls(self, encoder_out):
-        """Greedy transducer decoding calling native TRT decoder."""
+        """Greedy transducer decoding calling ONNX Runtime decoder."""
         import torch
 
         # encoder_out: (1, time, 512)

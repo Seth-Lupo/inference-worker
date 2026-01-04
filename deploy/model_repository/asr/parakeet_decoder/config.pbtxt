@@ -1,10 +1,10 @@
-# Parakeet Decoder Joint - Native TensorRT Backend
+# Parakeet Decoder Joint - ONNX Runtime Python Backend
 # Transducer decoder with joint network for autoregressive decoding
 #
 # Called once per frame, may emit multiple tokens per frame
 
 name: "parakeet_decoder"
-platform: "tensorrt_plan"
+backend: "python"
 max_batch_size: 0
 
 input [
@@ -61,11 +61,9 @@ instance_group [
   }
 ]
 
-optimization {
-  cuda {
-    graphs: true
-    busy_wait_events: true
-  }
+parameters {
+  key: "ONNX_DIR"
+  value: { string_value: "/models/asr/parakeet_onnx" }
 }
 
 version_policy: { latest: { num_versions: 1 } }

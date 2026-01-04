@@ -1,7 +1,7 @@
 """
 Chatterbox Turbo TTS via Triton Inference Server.
 
-Streaming text-to-speech with TensorRT acceleration.
+Streaming text-to-speech with GPU acceleration.
 Supports voice cloning via reference audio.
 
 Model inputs:
@@ -85,7 +85,7 @@ class ChatterboxTTS:
     Chatterbox Turbo TTS with streaming output and interrupt support.
 
     Features:
-    - TensorRT-accelerated inference
+    - GPU-accelerated inference (PyTorch + torch.compile)
     - Streaming audio output for low latency
     - Voice cloning via reference audio
     - Emotion exaggeration control

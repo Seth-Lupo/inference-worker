@@ -29,10 +29,9 @@ deploy/
 │   │
 │   │  # Build scripts
 │   ├── build_all.sh        # Build all models in sequence
-│   ├── build_cosyvoice.sh  # CosyVoice TTS (7 Triton models)
-│   ├── build_qwen3.sh      # Qwen3 LLM (TensorRT-LLM)
-│   ├── build_parakeet.sh   # Parakeet ASR (ONNX)
-│   ├── build_parakeet_trt.sh # (Optional) Parakeet TensorRT engines
+│   ├── build_chatterbox.sh # Chatterbox TTS (T3 + S3Gen)
+│   ├── build_qwen.sh       # Qwen3 LLM (vLLM)
+│   ├── build_parakeet.sh   # Parakeet ASR (ONNX Runtime)
 │   ├── clean_models.sh     # Cleanup build artifacts
 │   │
 │   │  # Container management
@@ -41,58 +40,51 @@ deploy/
 │   ├── start.sh            # Start containers
 │   ├── stop.sh             # Stop containers
 │   ├── status.sh           # Container status
-│   ├── logs.sh             # View logs
-│   │
-│   │  # Debugging (optional)
-│   ├── audit_cosyvoice_gpu.sh  # Check GPU config
-│   └── fix_cosyvoice_gpu.sh    # Fix GPU config locally
+│   └── logs.sh             # View logs
 │
 ├── model_repository/       # Triton models (created by build scripts)
-│   ├── parakeet_tdt/       # ASR model
-│   ├── qwen3/              # LLM model (vLLM)
-│   └── cosyvoice2_full/    # TTS models (7 submodels)
+│   ├── llm/
+│   │   ├── qwen3/          # LLM (vLLM backend)
+│   │   └── t3/             # T3 speech tokens (vLLM backend)
+│   ├── tts/
+│   │   ├── chatterbox/     # TTS orchestrator (Python BLS)
+│   │   ├── chatterbox_voice_encoder/  # Voice cloning (Python)
+│   │   ├── chatterbox_s3gen/          # Audio synthesis (Python + torch.compile)
+│   │   └── chatterbox_assets/         # Model weights
+│   └── asr/
+│       ├── parakeet_tdt/   # ASR orchestrator (Python BLS)
+│       ├── parakeet_encoder/  # Encoder (ONNX Runtime)
+│       ├── parakeet_decoder/  # Decoder (ONNX Runtime)
+│       └── parakeet_onnx/     # ONNX model files
 │
-├── cosyvoice_build/        # CosyVoice build artifacts
-│   ├── CosyVoice/          # Cloned repo (mounted for Python imports)
-│   ├── CosyVoice2-0.5B/    # ModelScope weights
-│   ├── cosyvoice2_llm/     # HuggingFace LLM
-│   └── trt_engines_*/      # Built TensorRT engines
+├── models/                 # Downloaded model weights
+│   ├── t3_weights/         # T3 vLLM weights
+│   └── qwen3_weights/      # Qwen3 vLLM weights
 │
-└── qwen3_build/            # Qwen3 build artifacts
-    └── engine_int4/        # Built TensorRT-LLM engine
+└── chatterbox_build/       # Chatterbox build artifacts
 ```
 
 ## Build Scripts
 
 | Script | Purpose | Time |
 |--------|---------|------|
-| `build_cosyvoice.sh -1 2` | Clone + download + build TTS | ~20 min |
-| `build_qwen3.sh` | Download + build LLM | ~30 min |
-| `build_parakeet.sh` | Download ASR model | ~5 min |
-| `build_all.sh` | All of the above | ~60 min |
-
-### CosyVoice Stages
-
-```bash
-./scripts/build_cosyvoice.sh -1 2   # All stages
-./scripts/build_cosyvoice.sh -1 -1  # Clone only (re-clones)
-./scripts/build_cosyvoice.sh 0 0    # Download models only
-./scripts/build_cosyvoice.sh 1 1    # Build TRT engines only
-./scripts/build_cosyvoice.sh 2 2    # Create model repo only
-./scripts/build_cosyvoice.sh cleanup --all  # Remove everything
-```
+| `build_chatterbox.sh` | Download + setup Chatterbox TTS | ~10 min |
+| `build_qwen.sh` | Download Qwen3 LLM weights | ~5 min |
+| `build_parakeet.sh` | Download Parakeet ASR ONNX | ~5 min |
+| `build_all.sh` | All of the above | ~20 min |
 
 ## Models
 
 | Model | Type | Backend | GPU |
 |-------|------|---------|-----|
 | `qwen3` | LLM | vLLM | Yes |
-| `parakeet_tdt` | ASR | Python (PyTorch) | Yes |
-| `cosyvoice2` | TTS Orchestrator | Python (BLS) | Yes |
-| `tensorrt_llm` | TTS LLM | TensorRT-LLM | Yes |
-| `audio_tokenizer` | TTS | Python | Yes |
-| `speaker_embedding` | TTS | Python | Yes |
-| `token2wav` | TTS Vocoder | Python | Yes |
+| `t3` | Speech Tokens | vLLM | Yes |
+| `chatterbox` | TTS Orchestrator | Python (BLS) | Yes |
+| `chatterbox_voice_encoder` | Voice Cloning | Python (PyTorch) | Yes |
+| `chatterbox_s3gen` | Audio Synthesis | Python (torch.compile) | Yes |
+| `parakeet_tdt` | ASR Orchestrator | Python (BLS) | Yes |
+| `parakeet_encoder` | ASR Encoder | Python (ONNX Runtime) | Yes |
+| `parakeet_decoder` | ASR Decoder | Python (ONNX Runtime) | Yes |
 
 ## Environment Variables
 
@@ -104,18 +96,18 @@ CUDA_VISIBLE_DEVICES=0    # GPU selection
 
 ## Troubleshooting
 
-### LFS files not downloaded
-```bash
-cd deploy/cosyvoice_build/CosyVoice2-0.5B
-git lfs pull
-```
-
-### Rebuild model repository
-```bash
-./scripts/build_cosyvoice.sh 2 2
-```
-
 ### Check model status
 ```bash
 curl localhost:8000/v2/models | jq
+```
+
+### View Triton logs
+```bash
+docker compose logs -f triton
+```
+
+### Rebuild specific model
+```bash
+./scripts/build_chatterbox.sh cleanup --all
+./scripts/build_chatterbox.sh
 ```

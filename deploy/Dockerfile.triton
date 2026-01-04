@@ -1,14 +1,18 @@
 # Triton Inference Server with vLLM + Python backends
 # For serving:
-#   - Chatterbox TTS (PyTorch + torch.compile)
-#   - Parakeet ASR (BLS + native TensorRT backends)
+#   - Qwen3 LLM (vLLM backend)
+#   - T3 speech token generator (vLLM backend)
+#   - Chatterbox TTS (Python backend with torch.compile)
+#   - Parakeet ASR (Python backend with ONNX Runtime GPU)
 #
 # Base image already includes: torch, transformers, huggingface_hub, tokenizers,
 # safetensors, numpy (via vLLM). We only add what's missing.
 #
 # Note: torchaudio removed - replaced with pure torch/librosa implementations
 # to avoid ABI compatibility issues with base image torch.
-FROM nvcr.io/nvidia/tritonserver:25.12-vllm-python-py3
+#
+# 25.05 requires Driver 575+ (compatible with Driver 580)
+FROM nvcr.io/nvidia/tritonserver:25.05-vllm-python-py3
 
 # Disable xformers to avoid triton kernel compatibility issues
 ENV XFORMERS_DISABLE_MEMORY_EFFICIENT_ATTENTION=1
@@ -32,11 +36,16 @@ RUN pip install --no-cache-dir \
         scipy
 
 # Install S3Gen/Chatterbox dependencies (not in base image)
-# Pin diffusers to older version to avoid xformers import issues
+# diffusers 0.27+ avoids cached_download deprecation in new huggingface_hub
+# DIFFUSERS_NO_XFORMERS=1 env var prevents xformers import issues
 # Note: transformers, huggingface_hub, tokenizers, safetensors already in base via vLLM
 RUN pip install --no-cache-dir \
         omegaconf \
         einops \
-        "diffusers==0.25.1" \
+        "diffusers>=0.27.0,<0.30.0" \
         conformer \
         s3tokenizer
+
+# Install ONNX Runtime GPU for Parakeet ASR
+# Uses CUDA EP for GPU acceleration of ONNX models
+RUN pip install --no-cache-dir onnxruntime-gpu

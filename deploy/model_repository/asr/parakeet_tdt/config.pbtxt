@@ -1,10 +1,10 @@
 # Parakeet TDT 0.6B V2 - BLS Orchestrator
-# Orchestrates native TensorRT backends for encoder and decoder
+# Orchestrates ONNX Runtime backends for encoder and decoder
 #
 # Architecture:
 #   parakeet_tdt (this model - BLS)
-#     ├── parakeet_encoder (tensorrt_plan) - mel → encoder hidden states
-#     └── parakeet_decoder (tensorrt_plan) - autoregressive decoding
+#     ├── parakeet_encoder (Python + ONNX Runtime GPU)
+#     └── parakeet_decoder (Python + ONNX Runtime GPU)
 #
 # Input: 16kHz mono audio (float32, normalized to [-1, 1])
 # Output: Transcription text
