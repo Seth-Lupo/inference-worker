@@ -154,10 +154,6 @@ class TritonPythonModel:
             "runtime_top_p": np.array([[0.95]], dtype=np.float32),
             "runtime_top_k": np.array([[50]], dtype=np.int32),
             "temperature": np.array([[0.8]], dtype=np.float32),
-            # Add repetition penalty to prevent LLM from generating same token repeatedly
-            "repetition_penalty": np.array([[1.2]], dtype=np.float32),
-            "frequency_penalty": np.array([[0.5]], dtype=np.float32),
-            "presence_penalty": np.array([[0.5]], dtype=np.float32),
             "input_ids": input_ids,
             "input_lengths": np.array([[input_ids.shape[1]]], dtype=np.int32),
         }
@@ -340,29 +336,32 @@ class TritonPythonModel:
         return speech_feat
 
     def _llm_gen_thread(self, generated_ids_iter, semantic_token_ids_arr, llm_is_done_flag, llm_error_flag):
-        """LLM generation thread with degenerate sequence detection.
-
-        IMPORTANT: TensorRT-LLM streaming returns CUMULATIVE output (all tokens so far),
-        not just new tokens. We must track what we've seen to avoid duplication.
-        """
+        """LLM generation thread with degenerate sequence detection."""
         consecutive_same = 0
         last_token = None
         max_consecutive_same = 50  # If same token 50 times in a row, something is wrong
-        last_seen_length = 0  # Track cumulative output to extract only new tokens
+        iteration_count = 0
 
         for generated_ids in generated_ids_iter:
+            iteration_count += 1
             generated_ids = generated_ids.tolist()
+
+            # Debug: log first few iterations to understand output format
+            if iteration_count <= 3:
+                self.logger.log_info(
+                    f"LLM iteration {iteration_count}: received {len(generated_ids)} tokens, "
+                    f"first few: {generated_ids[:5] if len(generated_ids) > 0 else 'empty'}"
+                )
+
             if len(generated_ids) == 0:
+                self.logger.log_info(f"LLM: empty response at iteration {iteration_count}, breaking")
                 break
 
-            # TensorRT-LLM returns cumulative output - extract only NEW tokens
-            new_tokens = generated_ids[last_seen_length:]
-            last_seen_length = len(generated_ids)
+            # TensorRT-LLM streaming: each response contains NEW tokens only
+            # (with exclude_input_in_output=true)
+            new_tokens = generated_ids
 
-            if len(new_tokens) == 0:
-                continue
-
-            # Check for degenerate repetition in NEW tokens only
+            # Check for degenerate repetition
             for token in new_tokens:
                 if token == last_token:
                     consecutive_same += 1
@@ -381,13 +380,14 @@ class TritonPythonModel:
             semantic_token_ids_arr.extend(new_tokens)
 
             # Log periodically
-            if len(semantic_token_ids_arr) % 100 == 0:
-                unique_tokens = len(set(semantic_token_ids_arr[-100:]))
+            if len(semantic_token_ids_arr) % 50 == 0:
+                unique_tokens = len(set(semantic_token_ids_arr[-50:]))
                 self.logger.log_info(
                     f"LLM progress: {len(semantic_token_ids_arr)} tokens, "
-                    f"unique in last 100: {unique_tokens}"
+                    f"unique in last 50: {unique_tokens}"
                 )
 
+        self.logger.log_info(f"LLM generation complete: {iteration_count} iterations, {len(semantic_token_ids_arr)} total tokens")
         llm_is_done_flag[0] = True
 
     def execute(self, requests):
