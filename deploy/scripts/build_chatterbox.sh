@@ -345,10 +345,8 @@ build_trt_vocoder() {
         log_info "Decomposing custom attention ops to standard ONNX..."
 
         # Ensure ONNX tools are installed
-        if ! python3.12 -c "import onnx" 2>/dev/null; then
-            log_info "Installing ONNX dependencies..."
-            pip3.12 install --quiet onnx onnx-graphsurgeon onnxruntime-tools || true
-        fi
+        log_info "Installing ONNX dependencies..."
+        pip3.12 install onnx onnx-graphsurgeon onnxruntime onnxsim protobuf numpy 2>&1 | grep -v "already satisfied" || true
 
         python3.12 "${SCRIPT_DIR}/decompose_onnx.py" \
             --input "${onnx_dir}/${onnx_file}" \

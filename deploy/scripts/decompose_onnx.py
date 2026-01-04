@@ -72,30 +72,51 @@ def try_onnxruntime_optimize(input_path: str, output_path: str) -> bool:
     This is the most reliable method as it handles all the weight transformations.
     """
     try:
-        from onnxruntime.transformers import optimizer
-        from onnxruntime.transformers.fusion_options import FusionOptions
+        # Try newer onnxruntime API first
+        try:
+            from onnxruntime.transformers import optimizer
+            from onnxruntime.transformers.fusion_options import FusionOptions
 
-        # Disable attention fusion to get decomposed ops
-        opts = FusionOptions('bert')
-        opts.enable_attention = False
-        opts.enable_flash_attention = False
-        opts.enable_packed_kv = False
-        opts.enable_packed_qkv = False
+            # Disable attention fusion to get decomposed ops
+            opts = FusionOptions('bert')
+            opts.enable_attention = False
+            opts.enable_flash_attention = False
+            opts.enable_packed_kv = False
+            opts.enable_packed_qkv = False
 
-        optimized = optimizer.optimize_model(
-            input_path,
-            model_type='bert',  # Generic transformer
-            opt_level=0,  # Minimal optimization
-            optimization_options=opts,
-            use_gpu=False,
-        )
+            optimized = optimizer.optimize_model(
+                input_path,
+                model_type='bert',  # Generic transformer
+                opt_level=0,  # Minimal optimization
+                optimization_options=opts,
+                use_gpu=False,
+            )
 
-        optimized.save_model_to_file(output_path)
-        print(f"Optimized with ONNX Runtime: {output_path}")
-        return True
+            optimized.save_model_to_file(output_path)
+            print(f"Optimized with ONNX Runtime: {output_path}")
+            return True
 
-    except ImportError:
-        print("onnxruntime.transformers not available")
+        except ImportError:
+            # Try older onnxruntime-tools API
+            from onnxruntime_tools import optimizer
+            from onnxruntime_tools.transformers.fusion_options import FusionOptions
+
+            opts = FusionOptions('bert')
+            opts.enable_attention = False
+
+            optimized = optimizer.optimize_model(
+                input_path,
+                model_type='bert',
+                opt_level=0,
+                optimization_options=opts,
+            )
+
+            optimized.save_model_to_file(output_path)
+            print(f"Optimized with onnxruntime-tools: {output_path}")
+            return True
+
+    except ImportError as e:
+        print(f"onnxruntime.transformers not available: {e}")
         return False
     except Exception as e:
         print(f"ONNX Runtime optimization failed: {e}")
