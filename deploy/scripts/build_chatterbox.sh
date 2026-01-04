@@ -1,33 +1,22 @@
 #!/bin/bash
 # =============================================================================
-# Build Chatterbox with T3 vLLM Backend
-#
-# Downloads model weights from HuggingFace and sets up Chatterbox TTS with
-# T3 running as a native Triton vLLM backend for high-performance inference.
+# Build Chatterbox TTS for Triton Inference Server
 #
 # Architecture:
-#   - T3: Triton vLLM backend (text -> speech tokens via Llama-based model)
-#   - S3Gen: Python backend (speech tokens -> audio via flow matching + HiFiGAN)
-#   - VoiceEncoder: Python backend (reference audio -> speaker embedding)
-#   - Progressive streaming: chunks 4,8,16,32,32 with diffusion steps 1,2,5,7,10
-#
-# T3 is served via Triton's native vLLM backend with trust_remote_code=true.
-# Chatterbox Python backend calls T3 via gRPC and runs S3Gen locally.
+#   - T3: Triton vLLM backend (text + speaker conditioning → speech tokens)
+#   - S3Gen: PyTorch in Python backend (speech tokens → audio via flow matching)
+#   - VoiceEncoder: PyTorch in Python backend (reference audio → speaker embedding)
+#   - TRTVocoder: Optional TensorRT for conditional_decoder (vocoder acceleration)
 #
 # Usage:
-#   ./build_chatterbox.sh [START_STAGE] [STOP_STAGE]
-#   ./build_chatterbox.sh 0 3       # Run all stages
-#   ./build_chatterbox.sh 3 3       # Only download T3 and assets
-#   ./build_chatterbox.sh cleanup   # Clean up
-#
-# Stages:
-#    0: Download ONNX models from HuggingFace (legacy)
-#    1: Build TensorRT engines (legacy)
-#    2: Create Triton model repository (legacy)
-#    3: Download T3 weights and assets for vLLM backend
+#   ./build_chatterbox.sh              # Build everything
+#   ./build_chatterbox.sh --no-trt     # Skip TensorRT vocoder build
+#   ./build_chatterbox.sh cleanup      # Clean up
 #
 # Container: nvcr.io/nvidia/tritonserver:24.12-vllm-python-py3
 # =============================================================================
+
+set -euo pipefail
 
 # Load shared utilities
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -36,44 +25,26 @@ source "${SCRIPT_DIR}/common.sh"
 # =============================================================================
 # Configuration
 # =============================================================================
-readonly MODEL_NAME="chatterbox"
-HF_REPO="${HF_REPO:-$(cfg_get 'chatterbox.hf_repo_onnx' 'ResembleAI/chatterbox-turbo-ONNX')}"
-HF_REPO_T3="${HF_REPO_T3:-$(cfg_get 'chatterbox.hf_repo' 'ResembleAI/chatterbox-turbo')}"
-PRECISION="${CHATTERBOX_PRECISION:-$(cfg_get 'chatterbox.precision' 'fp16')}"
+
+# HuggingFace repos
+HF_REPO_MAIN="${HF_REPO_MAIN:-ResembleAI/chatterbox}"
+HF_REPO_ONNX="${HF_REPO_ONNX:-ResembleAI/chatterbox-turbo-ONNX}"
 
 # Paths
 readonly DEPLOY_DIR="$(get_deploy_dir)"
 readonly WORK_DIR="${DEPLOY_DIR}/chatterbox_build"
-readonly CLONE_DIR="${WORK_DIR}/chatterbox-turbo-ONNX"
-readonly ONNX_DIR="${WORK_DIR}/onnx"
-readonly MODEL_REPO="${DEPLOY_DIR}/model_repository/tts"
-readonly MODEL_DIR="${MODEL_REPO}/${MODEL_NAME}"
-readonly ASSETS_DIR="${MODEL_REPO}/${MODEL_NAME}_assets"
-# T3 weights for vLLM backend (mounted at /models/t3_weights in container)
+
+# T3 vLLM model location (mounted at /models/t3_weights in container)
 readonly T3_WEIGHTS_DIR="${DEPLOY_DIR}/models/t3_weights"
+readonly T3_MODEL_DIR="${DEPLOY_DIR}/model_repository/llm/t3"
 
-# ONNX model files
-if [[ "$PRECISION" == "fp16" ]]; then
-    EMBED_ONNX="embed_tokens_fp16.onnx"
-    LM_ONNX="language_model_fp16.onnx"
-    ENCODER_ONNX="speech_encoder_fp16.onnx"
-    DECODER_ONNX="conditional_decoder_fp16.onnx"
-else
-    EMBED_ONNX="embed_tokens.onnx"
-    LM_ONNX="language_model.onnx"
-    ENCODER_ONNX="speech_encoder.onnx"
-    DECODER_ONNX="conditional_decoder.onnx"
-fi
+# Chatterbox Python backend
+readonly CHATTERBOX_DIR="${DEPLOY_DIR}/model_repository/tts/chatterbox"
+readonly ASSETS_DIR="${DEPLOY_DIR}/model_repository/tts/chatterbox_assets"
 
-# TensorRT dynamic shapes
-# Format: min,opt,max for each input
-# For multiple inputs, separate with space
-declare -A TRT_SHAPES=(
-    ["embed_tokens"]="input_ids:1x1,input_ids:4x256,input_ids:8x1024"
-    ["speech_encoder"]="input_features:1x80x100,input_features:1x80x500,input_features:1x80x3000"
-    ["conditional_decoder"]="speech_tokens:1x4,speech_tokens:1x32,speech_tokens:1x64"
-)
-# Note: conditional_decoder uses progressive chunks 4,8,16,32,32 so min=4, opt=32, max=64
+# TRT vocoder (optional)
+readonly TRT_ENGINE_DIR="${CHATTERBOX_DIR}/1/engines"
+BUILD_TRT="${BUILD_TRT:-true}"
 
 # =============================================================================
 # Cleanup Handler
@@ -86,258 +57,107 @@ if [[ "${1:-}" == "cleanup" || "${1:-}" == "clean" ]]; then
         --all|-a)
             log_warn "Removing ALL build artifacts..."
             rm -rf "$WORK_DIR"
-            rm -rf "$MODEL_DIR"
+            rm -rf "$T3_WEIGHTS_DIR"
             rm -rf "$ASSETS_DIR"
-            # Keep model code files but remove weights
-            rm -f "${T3_WEIGHTS_DIR}/t3_cfg.safetensors"
-            rm -f "${T3_WEIGHTS_DIR}/model.safetensors"
-            rm -f "${T3_WEIGHTS_DIR}/tokenizer.json"
-            rm -f "${T3_WEIGHTS_DIR}/conditioning.pt"
+            rm -rf "$TRT_ENGINE_DIR"
             log_info "Cleanup complete"
             ;;
-        --t3)
-            log_info "Removing T3 weights..."
-            rm -f "${T3_WEIGHTS_DIR}/t3_cfg.safetensors"
-            rm -f "${T3_WEIGHTS_DIR}/model.safetensors"
-            rm -f "${T3_WEIGHTS_DIR}/conditioning.pt"
-            log_info "T3 weights removed"
+        --trt|-t)
+            log_info "Removing TRT engines..."
+            rm -rf "$TRT_ENGINE_DIR"
+            rm -rf "${WORK_DIR}/onnx"
+            log_info "TRT engines removed"
             ;;
-        --engines|-e)
-            log_info "Removing TRT engines only..."
-            rm -rf "${WORK_DIR}/engines"
-            rm -rf "${MODEL_DIR}/1/engines"
-            log_info "Engines removed"
+        --weights|-w)
+            log_info "Removing downloaded weights..."
+            rm -rf "$T3_WEIGHTS_DIR"
+            rm -rf "$ASSETS_DIR"
+            log_info "Weights removed"
             ;;
         *)
-            log_info "Removing downloads (keeping engines)..."
-            rm -rf "$CLONE_DIR"
+            log_info "Removing work directory only..."
+            rm -rf "$WORK_DIR"
             log_info "Cleanup complete"
-            log_info "To also remove model: $0 cleanup --all"
-            log_info "To rebuild engines:   $0 cleanup --engines"
+            echo ""
+            echo "Other cleanup options:"
+            echo "  $0 cleanup --trt      Remove TRT engines"
+            echo "  $0 cleanup --weights  Remove downloaded weights"
+            echo "  $0 cleanup --all      Remove everything"
             ;;
     esac
     exit 0
 fi
 
-# Parse stages
-START_STAGE="${1:-0}"
-STOP_STAGE="${2:-3}"
+# Parse arguments
+if [[ "${1:-}" == "--no-trt" ]]; then
+    BUILD_TRT="false"
+    shift
+fi
 
 echo "=============================================="
-echo "Building Chatterbox Turbo TensorRT Engines"
+echo "Building Chatterbox TTS"
 echo "=============================================="
-echo "Stages: ${START_STAGE} to ${STOP_STAGE}"
-echo "Precision: ${PRECISION}"
+echo ""
+echo "T3 vLLM model:  ${T3_WEIGHTS_DIR}"
+echo "Assets:         ${ASSETS_DIR}"
+echo "TRT vocoder:    ${BUILD_TRT}"
 echo ""
 
 mkdir -p "$WORK_DIR"
 
 # =============================================================================
-# Stage 0: Download ONNX Models
+# Stage 1: Download T3 Model for vLLM Backend
 # =============================================================================
-stage_download() {
-    log_step "Stage 0: Downloading ONNX models from HuggingFace..."
-
-    mkdir -p "$ONNX_DIR"
-
-    # Check if already downloaded (LM is the largest file)
-    if is_real_file "${ONNX_DIR}/${LM_ONNX}" 100000000; then
-        log_info "ONNX models already downloaded at: $ONNX_DIR"
-        return 0
-    fi
-
-    # Clone with full LFS (like parakeet script)
-    log_info "Cloning ${HF_REPO} with LFS..."
-    hf_clone "$HF_REPO" "$CLONE_DIR" || {
-        log_error "Failed to clone from HuggingFace"
-        return 1
-    }
-
-    # Copy needed files to onnx_dir based on precision
-    log_info "Copying ${PRECISION} ONNX models..."
-    cp "${CLONE_DIR}/onnx/${EMBED_ONNX}"* "$ONNX_DIR/" 2>/dev/null || true
-    cp "${CLONE_DIR}/onnx/${LM_ONNX}"* "$ONNX_DIR/" 2>/dev/null || true
-    cp "${CLONE_DIR}/onnx/${ENCODER_ONNX}"* "$ONNX_DIR/" 2>/dev/null || true
-    cp "${CLONE_DIR}/onnx/${DECODER_ONNX}"* "$ONNX_DIR/" 2>/dev/null || true
-    cp "${CLONE_DIR}"/*.json "$ONNX_DIR/" 2>/dev/null || true
-
-    # Verify key files exist and are real (not LFS pointers)
-    local required_files=("$EMBED_ONNX" "$LM_ONNX" "$ENCODER_ONNX" "$DECODER_ONNX")
-    for file in "${required_files[@]}"; do
-        if [[ ! -f "${ONNX_DIR}/${file}" ]]; then
-            log_error "Missing ONNX file: ${file}"
-            return 1
-        fi
-        if ! is_real_file "${ONNX_DIR}/${file}" 1000; then
-            log_error "ONNX file is LFS pointer (not downloaded): ${file}"
-            log_error "Try: cd ${CLONE_DIR} && git lfs pull"
-            return 1
-        fi
-    done
-
-    log_info "ONNX models ready at: $ONNX_DIR"
-    ls -lh "$ONNX_DIR"/*.onnx 2>/dev/null || true
-}
-
-# =============================================================================
-# Stage 1: Build TensorRT Engines (uses build_trt_engine from common.sh)
-# =============================================================================
-stage_build_engines() {
-    log_step "Stage 1: Building TensorRT engines..."
-
-    local engine_dir="${WORK_DIR}/engines"
-    mkdir -p "$engine_dir"
-
-    # Verify ONNX models exist
-    if [[ ! -f "${ONNX_DIR}/${EMBED_ONNX}" ]]; then
-        log_error "ONNX models not found. Run stage 0 first."
-        return 1
-    fi
-
-    # Determine precision flag
-    local precision_flag="--fp16"
-    [[ "$PRECISION" == "fp32" ]] && precision_flag="--fp32"
-
-    # Build each model using build_trt_engine from common.sh (runs in Docker)
-    local success=0
-    local failed=0
-
-    # embed_tokens
-    log_info "Building embed_tokens engine..."
-    local shapes="${TRT_SHAPES[embed_tokens]}"
-    IFS=',' read -r min_shape opt_shape max_shape <<< "$shapes"
-    if build_trt_engine \
-        "${ONNX_DIR}/${EMBED_ONNX}" \
-        "${engine_dir}/embed_tokens.engine" \
-        "$precision_flag" \
-        "--minShapes=${min_shape}" \
-        "--optShapes=${opt_shape}" \
-        "--maxShapes=${max_shape}"; then
-        ((success++))
-    else
-        ((failed++))
-    fi
-
-    # speech_encoder
-    log_info "Building speech_encoder engine..."
-    shapes="${TRT_SHAPES[speech_encoder]}"
-    IFS=',' read -r min_shape opt_shape max_shape <<< "$shapes"
-    if build_trt_engine \
-        "${ONNX_DIR}/${ENCODER_ONNX}" \
-        "${engine_dir}/speech_encoder.engine" \
-        "$precision_flag" \
-        "--minShapes=${min_shape}" \
-        "--optShapes=${opt_shape}" \
-        "--maxShapes=${max_shape}"; then
-        ((success++))
-    else
-        ((failed++))
-    fi
-
-    # conditional_decoder (vocoder)
-    log_info "Building conditional_decoder engine..."
-    shapes="${TRT_SHAPES[conditional_decoder]}"
-    IFS=',' read -r min_shape opt_shape max_shape <<< "$shapes"
-    if build_trt_engine \
-        "${ONNX_DIR}/${DECODER_ONNX}" \
-        "${engine_dir}/conditional_decoder.engine" \
-        "$precision_flag" \
-        "--minShapes=${min_shape}" \
-        "--optShapes=${opt_shape}" \
-        "--maxShapes=${max_shape}"; then
-        ((success++))
-    else
-        ((failed++))
-    fi
-
-    log_info "TRT build complete: ${success} succeeded, ${failed} failed"
-
-    if [[ $success -eq 0 ]]; then
-        log_error "No engines built successfully"
-        return 1
-    fi
-
-    # Copy engines to model dir
-    mkdir -p "${MODEL_DIR}/1/engines"
-    cp "${engine_dir}"/*.engine "${MODEL_DIR}/1/engines/" 2>/dev/null || true
-
-    log_info "Engines copied to: ${MODEL_DIR}/1/engines/"
-    ls -lh "${MODEL_DIR}/1/engines/"*.engine 2>/dev/null || true
-}
-
-# =============================================================================
-# Stage 2: Create Model Repository
-# =============================================================================
-stage_create_repo() {
-    log_step "Stage 2: Creating Triton model repository..."
-
-    local engine_dir="${WORK_DIR}/engines"
-
-    mkdir -p "${MODEL_DIR}/1/engines"
-    mkdir -p "${ASSETS_DIR}"
-
-    # Copy TensorRT engines (or ONNX fallbacks)
-    for model in embed_tokens speech_encoder conditional_decoder; do
-        if [[ -f "${engine_dir}/${model}.engine" ]]; then
-            cp "${engine_dir}/${model}.engine" "${MODEL_DIR}/1/engines/"
-            log_info "  $model: TensorRT engine"
-        else
-            # Fallback to ONNX
-            local onnx_name
-            case $model in
-                embed_tokens) onnx_name="$EMBED_ONNX" ;;
-                speech_encoder) onnx_name="$ENCODER_ONNX" ;;
-                conditional_decoder) onnx_name="$DECODER_ONNX" ;;
-            esac
-            cp "${ONNX_DIR}/${onnx_name}"* "${MODEL_DIR}/1/engines/" 2>/dev/null || true
-            log_info "  $model: ONNX fallback"
-        fi
-    done
-
-    # Copy language model ONNX (for the autoregressive loop)
-    cp "${ONNX_DIR}/${LM_ONNX}"* "${MODEL_DIR}/1/engines/" 2>/dev/null || true
-    log_info "  language_model: ONNX"
-
-    # Copy config files to assets
-    cp "${ONNX_DIR}"/*.json "${ASSETS_DIR}/" 2>/dev/null || true
-
-    log_info "Model repository created: ${MODEL_DIR}"
-}
-
-# =============================================================================
-# Stage 3: Download T3 weights and Chatterbox assets for vLLM backend
-# =============================================================================
-stage_build_t3() {
-    log_step "Stage 3: Setting up T3 vLLM backend and Chatterbox assets..."
+download_t3() {
+    log_step "Downloading T3 model for vLLM backend..."
 
     mkdir -p "$T3_WEIGHTS_DIR"
-    mkdir -p "$ASSETS_DIR"
 
-    # -------------------------------------------------------------------------
-    # 3a: Download T3 model weights to vLLM model directory
-    # -------------------------------------------------------------------------
-    log_info "Downloading T3 Turbo weights for vLLM backend..."
-
+    # Check if already downloaded
     if is_real_file "${T3_WEIGHTS_DIR}/t3_cfg.safetensors" 100000000; then
-        local size
-        size=$(get_file_size "${T3_WEIGHTS_DIR}/t3_cfg.safetensors")
-        log_info "T3 weights already downloaded ($(numfmt --to=iec "$size" 2>/dev/null || echo "${size}B"))"
+        log_info "T3 weights already downloaded"
     else
-        # Download from ResembleAI/chatterbox (main repo has the weights)
-        hf_download "ResembleAI/chatterbox" "$T3_WEIGHTS_DIR" "t3_cfg.safetensors" "tokenizer.json" || {
-            log_error "Failed to download T3 model"
+        # Download T3 weights and tokenizer
+        log_info "Downloading T3 weights from ${HF_REPO_MAIN}..."
+        hf_download "$HF_REPO_MAIN" "$T3_WEIGHTS_DIR" \
+            "t3_cfg.safetensors" \
+            "tokenizer.json" || {
+            log_error "Failed to download T3 weights"
             return 1
         }
     fi
 
-    # Create symlink for vLLM weight loading
-    if [[ -f "${T3_WEIGHTS_DIR}/t3_cfg.safetensors" ]] && [[ ! -f "${T3_WEIGHTS_DIR}/model.safetensors" ]]; then
+    # Create model.safetensors symlink for vLLM
+    if [[ ! -e "${T3_WEIGHTS_DIR}/model.safetensors" ]]; then
         ln -sf "t3_cfg.safetensors" "${T3_WEIGHTS_DIR}/model.safetensors"
         log_info "Created symlink: model.safetensors -> t3_cfg.safetensors"
     fi
 
-    # Create tokenizer_config.json for vLLM to use custom EnTokenizer
-    cat > "${T3_WEIGHTS_DIR}/tokenizer_config.json" << 'EOF'
+    # Download T3 model code files (required for vLLM with trust_remote_code)
+    local code_files=("config.json" "modeling_t3.py" "configuration_t3.py" "entokenizer.py")
+    local missing_code=false
+
+    for file in "${code_files[@]}"; do
+        if [[ ! -f "${T3_WEIGHTS_DIR}/${file}" ]]; then
+            missing_code=true
+            break
+        fi
+    done
+
+    if [[ "$missing_code" == "true" ]]; then
+        log_info "Downloading T3 model code files..."
+        # Try to download from chatterbox-turbo repo (has the model code)
+        hf_download "ResembleAI/chatterbox-turbo" "$T3_WEIGHTS_DIR" \
+            "${code_files[@]}" 2>/dev/null || {
+            log_warn "Could not download from chatterbox-turbo, trying main repo..."
+            hf_download "$HF_REPO_MAIN" "$T3_WEIGHTS_DIR" \
+                "${code_files[@]}" 2>/dev/null || true
+        }
+    fi
+
+    # Create tokenizer_config.json for vLLM
+    if [[ ! -f "${T3_WEIGHTS_DIR}/tokenizer_config.json" ]]; then
+        cat > "${T3_WEIGHTS_DIR}/tokenizer_config.json" << 'EOF'
 {
     "tokenizer_class": "EnTokenizer",
     "auto_map": {
@@ -349,170 +169,305 @@ stage_build_t3() {
     "clean_up_tokenization_spaces": true
 }
 EOF
-    log_info "Created tokenizer_config.json for EnTokenizer"
+        log_info "Created tokenizer_config.json"
+    fi
 
-    # -------------------------------------------------------------------------
-    # 3b: Download VoiceEncoder, S3Gen, and default conditionals
-    # -------------------------------------------------------------------------
-    log_info "Downloading VoiceEncoder and S3Gen assets..."
-
-    local asset_files=(
-        "ve.safetensors"
-        "s3gen.safetensors"
-        "conds.pt"
-    )
-
-    for file in "${asset_files[@]}"; do
-        if is_real_file "${ASSETS_DIR}/${file}" 1000000; then
-            log_info "  $file: Already exists"
+    # Verify required files
+    log_info "Verifying T3 model files..."
+    local required=("t3_cfg.safetensors" "tokenizer.json" "config.json" "modeling_t3.py" "configuration_t3.py" "entokenizer.py")
+    local missing=0
+    for file in "${required[@]}"; do
+        if [[ -f "${T3_WEIGHTS_DIR}/${file}" ]]; then
+            log_info "  ✓ ${file}"
         else
-            hf_download "ResembleAI/chatterbox" "$ASSETS_DIR" "$file" || {
-                log_warn "Failed to download $file"
+            log_warn "  ✗ ${file} MISSING"
+            ((missing++))
+        fi
+    done
+
+    if [[ $missing -gt 0 ]]; then
+        log_error "Missing ${missing} required T3 files"
+        log_error "T3 model code files may need to be copied manually"
+        return 1
+    fi
+
+    log_info "T3 model ready at: ${T3_WEIGHTS_DIR}"
+}
+
+# =============================================================================
+# Stage 2: Download S3Gen and VoiceEncoder (PyTorch)
+# =============================================================================
+download_assets() {
+    log_step "Downloading S3Gen and VoiceEncoder assets..."
+
+    mkdir -p "$ASSETS_DIR"
+
+    local files=("s3gen.safetensors" "ve.safetensors" "conds.pt")
+
+    for file in "${files[@]}"; do
+        if is_real_file "${ASSETS_DIR}/${file}" 1000000; then
+            log_info "  ✓ ${file} (already downloaded)"
+        else
+            log_info "  Downloading ${file}..."
+            hf_download "$HF_REPO_MAIN" "$ASSETS_DIR" "$file" || {
+                log_error "Failed to download ${file}"
+                return 1
             }
         fi
     done
 
-    # Copy tokenizer to assets for Chatterbox Python backend
-    if [[ -f "${T3_WEIGHTS_DIR}/tokenizer.json" ]]; then
+    # Copy tokenizer to assets (Python backend needs it too)
+    if [[ -f "${T3_WEIGHTS_DIR}/tokenizer.json" ]] && [[ ! -f "${ASSETS_DIR}/tokenizer.json" ]]; then
         cp "${T3_WEIGHTS_DIR}/tokenizer.json" "${ASSETS_DIR}/"
         log_info "Copied tokenizer.json to assets"
     fi
 
-    # Copy T3 weights to assets (for conditioning encoder in Python backend)
-    if [[ -f "${T3_WEIGHTS_DIR}/t3_cfg.safetensors" ]]; then
-        cp "${T3_WEIGHTS_DIR}/t3_cfg.safetensors" "${ASSETS_DIR}/"
-        log_info "Copied t3_cfg.safetensors to assets"
+    log_info "Assets ready at: ${ASSETS_DIR}"
+}
+
+# =============================================================================
+# Stage 3: Build TensorRT Vocoder (Optional)
+# =============================================================================
+build_trt_vocoder() {
+    if [[ "$BUILD_TRT" != "true" ]]; then
+        log_info "Skipping TRT vocoder build (--no-trt)"
+        return 0
     fi
 
-    # -------------------------------------------------------------------------
-    # 3c: Compile voice conditioning files for T3 vLLM backend
-    # -------------------------------------------------------------------------
-    log_info "Compiling voice conditioning files..."
+    log_step "Building TensorRT vocoder..."
 
-    local voices_dir="${DEPLOY_DIR}/voices"
-    local voices_output_dir="${T3_WEIGHTS_DIR}/voices"
+    local onnx_dir="${WORK_DIR}/onnx"
+    mkdir -p "$onnx_dir"
+    mkdir -p "$TRT_ENGINE_DIR"
 
-    # Check if we have the required files
-    if [[ ! -f "${ASSETS_DIR}/t3_cfg.safetensors" ]]; then
-        log_warn "Missing t3_cfg.safetensors - cannot create voice conditioning"
-        log_warn "T3 will require runtime conditioning (not supported with vLLM backend)"
-    else
-        # Find Python
-        local conda_python="${CONDA_PREFIX:-/opt/conda}/bin/python"
-        local system_python="python3"
-        local python_cmd
-
-        if [[ -x "$conda_python" ]]; then
-            python_cmd="$conda_python"
-        else
-            python_cmd="$system_python"
-        fi
-
-        # Build command arguments
-        local cmd_args=(
-            "${SCRIPT_DIR}/create_conditioning.py"
-            --assets-dir "${ASSETS_DIR}"
-            --output-dir "${voices_output_dir}"
-        )
-
-        # Add voices directory if it exists and has audio files
-        local has_voices=false
-        if [[ -d "$voices_dir" ]]; then
-            for ext in wav mp3 flac ogg m4a; do
-                if compgen -G "${voices_dir}/*.${ext}" > /dev/null 2>&1; then
-                    has_voices=true
-                    break
-                fi
-            done
-        fi
-
-        if [[ "$has_voices" == "true" ]]; then
-            local voice_count
-            voice_count=$(find "$voices_dir" -maxdepth 1 -type f \( -name "*.wav" -o -name "*.mp3" -o -name "*.flac" -o -name "*.ogg" -o -name "*.m4a" \) | wc -l | tr -d ' ')
-            log_info "Found ${voice_count} voice file(s) in ${voices_dir}"
-            cmd_args+=(--voices-dir "${voices_dir}")
-        else
-            log_info "No custom voices in ${voices_dir} - using default voice only"
-        fi
-
-        log_info "Running create_conditioning.py..."
-        if $python_cmd "${cmd_args[@]}"; then
-            log_info "Voice conditioning compiled successfully"
-
-            # Show compiled voices
-            if [[ -f "${voices_output_dir}/voices.json" ]]; then
-                log_info "Available voices:"
-                cat "${voices_output_dir}/voices.json"
-            fi
-        else
-            log_warn "Failed to compile voice conditioning - T3 may not work correctly"
-            log_warn "You can create it manually with: python scripts/create_conditioning.py --voices-dir voices/"
-        fi
+    # Check if engine already exists
+    if [[ -f "${TRT_ENGINE_DIR}/conditional_decoder.engine" ]]; then
+        log_info "TRT vocoder engine already exists"
+        return 0
     fi
 
-    # -------------------------------------------------------------------------
-    # 3d: Verify model files
-    # -------------------------------------------------------------------------
-    log_info "Verifying T3 vLLM model files..."
-    local t3_missing=0
-    local t3_required=(
-        "config.json"
-        "configuration_t3.py"
-        "modeling_t3.py"
-        "entokenizer.py"
-        "tokenizer.json"
-        "tokenizer_config.json"
-        "t3_cfg.safetensors"
-    )
-    for file in "${t3_required[@]}"; do
-        if [[ -f "${T3_WEIGHTS_DIR}/${file}" ]]; then
-            local size
-            size=$(get_file_size "${T3_WEIGHTS_DIR}/${file}")
-            log_info "  $file: $(numfmt --to=iec "$size" 2>/dev/null || echo "${size}B")"
-        else
-            log_warn "  $file: MISSING"
-            ((t3_missing++))
-        fi
-    done
+    # Download ONNX model for conditional_decoder only
+    local onnx_file="conditional_decoder_fp16.onnx"
+    if [[ ! -f "${onnx_dir}/${onnx_file}" ]] || ! is_real_file "${onnx_dir}/${onnx_file}" 1000; then
+        log_info "Downloading ONNX vocoder model..."
 
-    # Check voices
-    log_info "Verifying compiled voices..."
-    if [[ -d "${T3_WEIGHTS_DIR}/voices" ]]; then
-        local voice_count
-        voice_count=$(find "${T3_WEIGHTS_DIR}/voices" -name "*.pt" | wc -l | tr -d ' ')
-        log_info "  Found ${voice_count} compiled voice(s)"
-        if [[ -f "${T3_WEIGHTS_DIR}/voices/voices.json" ]]; then
-            log_info "  Voice manifest: voices.json"
-        fi
-    else
-        log_warn "  No voices directory found"
-        ((t3_missing++))
+        # Clone ONNX repo
+        hf_clone "$HF_REPO_ONNX" "${WORK_DIR}/onnx_repo" || {
+            log_error "Failed to clone ONNX repo"
+            return 1
+        }
+
+        # Copy only the vocoder ONNX
+        cp "${WORK_DIR}/onnx_repo/onnx/${onnx_file}"* "$onnx_dir/" 2>/dev/null || {
+            log_error "conditional_decoder ONNX not found"
+            return 1
+        }
     fi
 
-    log_info "Verifying Chatterbox assets..."
-    local asset_missing=0
-    for file in ve.safetensors s3gen.safetensors conds.pt tokenizer.json t3_cfg.safetensors; do
-        if [[ -f "${ASSETS_DIR}/${file}" ]]; then
-            local size
-            size=$(get_file_size "${ASSETS_DIR}/${file}")
-            log_info "  $file: $(numfmt --to=iec "$size" 2>/dev/null || echo "${size}B")"
-        else
-            log_warn "  $file: MISSING"
-            ((asset_missing++))
-        fi
-    done
-
-    if [[ $t3_missing -gt 0 ]]; then
-        log_error "$t3_missing T3 model files missing - vLLM backend will not work"
+    # Verify ONNX is real (not LFS pointer)
+    if ! is_real_file "${onnx_dir}/${onnx_file}" 100000; then
+        log_error "ONNX file is LFS pointer, not actual model"
         return 1
     fi
 
-    if [[ $asset_missing -gt 0 ]]; then
-        log_warn "$asset_missing asset files missing - TTS may not work correctly"
+    # Build TensorRT engine
+    # Shapes: progressive chunks 4,8,16,32,32 tokens -> min=4, opt=32, max=64
+    log_info "Building TensorRT engine (this may take a few minutes)..."
+    build_trt_engine \
+        "${onnx_dir}/${onnx_file}" \
+        "${TRT_ENGINE_DIR}/conditional_decoder.engine" \
+        "--fp16" \
+        "--minShapes=speech_tokens:1x4" \
+        "--optShapes=speech_tokens:1x32" \
+        "--maxShapes=speech_tokens:1x64" || {
+        log_warn "TRT build failed - will use PyTorch S3Gen vocoder"
+        return 0
+    }
+
+    log_info "TRT vocoder built: ${TRT_ENGINE_DIR}/conditional_decoder.engine"
+}
+
+# =============================================================================
+# Stage 4: Compile Voice Conditioning
+# =============================================================================
+compile_voices() {
+    log_step "Compiling voice conditioning..."
+
+    local voices_dir="${DEPLOY_DIR}/voices"
+    local output_dir="${T3_WEIGHTS_DIR}/voices"
+
+    mkdir -p "$output_dir"
+
+    # Check required assets
+    if [[ ! -f "${ASSETS_DIR}/ve.safetensors" ]]; then
+        log_warn "VoiceEncoder not found - skipping voice compilation"
+        return 0
     fi
 
-    log_info "T3 vLLM model: ${T3_WEIGHTS_DIR}"
-    log_info "Chatterbox assets: ${ASSETS_DIR}"
+    # Find Python
+    local python_cmd="python3"
+    [[ -x "${CONDA_PREFIX:-/opt/conda}/bin/python" ]] && python_cmd="${CONDA_PREFIX:-/opt/conda}/bin/python"
+
+    # Check for voice files
+    local has_voices=false
+    if [[ -d "$voices_dir" ]]; then
+        for ext in wav mp3 flac ogg m4a; do
+            if compgen -G "${voices_dir}/*.${ext}" > /dev/null 2>&1; then
+                has_voices=true
+                break
+            fi
+        done
+    fi
+
+    # Build command
+    local cmd_args=(
+        "${SCRIPT_DIR}/create_conditioning.py"
+        --assets-dir "${ASSETS_DIR}"
+        --output-dir "${output_dir}"
+    )
+
+    if [[ "$has_voices" == "true" ]]; then
+        local count
+        count=$(find "$voices_dir" -maxdepth 1 -type f \( -name "*.wav" -o -name "*.mp3" -o -name "*.flac" \) | wc -l | tr -d ' ')
+        log_info "Found ${count} voice file(s) in ${voices_dir}"
+        cmd_args+=(--voices-dir "${voices_dir}")
+    else
+        log_info "No custom voices - using default only"
+    fi
+
+    # Run compilation
+    if $python_cmd "${cmd_args[@]}" 2>/dev/null; then
+        log_info "Voice conditioning compiled"
+        [[ -f "${output_dir}/voices.json" ]] && cat "${output_dir}/voices.json"
+    else
+        log_warn "Voice compilation failed - T3 may need runtime conditioning"
+    fi
+}
+
+# =============================================================================
+# Stage 5: Create Triton Configs
+# =============================================================================
+create_triton_configs() {
+    log_step "Creating Triton model configs..."
+
+    # -------------------------------------------------------------------------
+    # T3 vLLM model config
+    # -------------------------------------------------------------------------
+    mkdir -p "${T3_MODEL_DIR}/1"
+
+    # model.json for vLLM backend
+    cat > "${T3_MODEL_DIR}/1/model.json" << EOF
+{
+    "model": "/models/t3_weights",
+    "disable_log_requests": true,
+    "gpu_memory_utilization": 0.3,
+    "max_model_len": 2048,
+    "tensor_parallel_size": 1,
+    "dtype": "float16",
+    "trust_remote_code": true,
+    "enforce_eager": true
+}
+EOF
+    log_info "Created: ${T3_MODEL_DIR}/1/model.json"
+
+    # config.pbtxt for Triton
+    cat > "${T3_MODEL_DIR}/config.pbtxt" << 'EOF'
+# T3 Speech Token Generator via vLLM Backend
+name: "t3"
+backend: "vllm"
+
+instance_group [
+  {
+    count: 1
+    kind: KIND_MODEL
+  }
+]
+
+parameters: {
+  key: "REPORT_CUSTOM_METRICS"
+  value: { string_value: "true" }
+}
+EOF
+    log_info "Created: ${T3_MODEL_DIR}/config.pbtxt"
+
+    # -------------------------------------------------------------------------
+    # Chatterbox Python backend config (if not exists)
+    # -------------------------------------------------------------------------
+    if [[ ! -f "${CHATTERBOX_DIR}/config.pbtxt" ]]; then
+        mkdir -p "${CHATTERBOX_DIR}/1"
+
+        cat > "${CHATTERBOX_DIR}/config.pbtxt" << 'EOF'
+# Chatterbox TTS Python Backend
+# Calls T3 via gRPC for token generation, runs S3Gen locally for audio synthesis
+name: "chatterbox"
+backend: "python"
+max_batch_size: 1
+
+input [
+  {
+    name: "text"
+    data_type: TYPE_STRING
+    dims: [ 1 ]
+  },
+  {
+    name: "speaker_id"
+    data_type: TYPE_STRING
+    dims: [ 1 ]
+    optional: true
+  },
+  {
+    name: "reference_audio"
+    data_type: TYPE_FP32
+    dims: [ -1 ]
+    optional: true
+  }
+]
+
+output [
+  {
+    name: "audio"
+    data_type: TYPE_FP32
+    dims: [ -1 ]
+  },
+  {
+    name: "sample_rate"
+    data_type: TYPE_INT32
+    dims: [ 1 ]
+  }
+]
+
+instance_group [
+  {
+    count: 1
+    kind: KIND_GPU
+    gpus: [ 0 ]
+  }
+]
+
+# Enable streaming for progressive audio output
+model_transaction_policy {
+  decoupled: true
+}
+
+parameters {
+  key: "ASSETS_DIR"
+  value: { string_value: "/models/tts/chatterbox_assets" }
+}
+
+parameters {
+  key: "T3_MODEL_NAME"
+  value: { string_value: "t3" }
+}
+
+parameters {
+  key: "TRITON_GRPC_URL"
+  value: { string_value: "localhost:8001" }
+}
+EOF
+        log_info "Created: ${CHATTERBOX_DIR}/config.pbtxt"
+    else
+        log_info "Chatterbox config.pbtxt already exists"
+    fi
 }
 
 # =============================================================================
@@ -521,61 +476,45 @@ EOF
 show_summary() {
     echo ""
     echo "=============================================="
-    echo -e "${GREEN}Chatterbox Build Complete${NC}"
+    log_info "Chatterbox Build Complete!"
     echo "=============================================="
     echo ""
-    echo "Models built:"
-    echo "  - Triton TTS: ${MODEL_DIR}"
-    [[ $STOP_STAGE -ge 3 ]] && echo "  - T3 vLLM:    ${T3_WEIGHTS_DIR}"
-    [[ $STOP_STAGE -ge 3 ]] && echo "  - Assets:     ${ASSETS_DIR}"
+    echo "T3 vLLM Model:"
+    echo "  Location: ${T3_WEIGHTS_DIR}"
+    echo "  Triton:   ${T3_MODEL_DIR}"
+    ls -lh "${T3_WEIGHTS_DIR}"/*.safetensors 2>/dev/null | head -3
     echo ""
-
-    if [[ -d "${MODEL_DIR}/1/engines" ]]; then
-        echo "Engines:"
-        ls -lh "${MODEL_DIR}/1/engines/"*.engine 2>/dev/null || echo "  (ONNX fallback)"
+    echo "S3Gen/VE Assets:"
+    echo "  Location: ${ASSETS_DIR}"
+    ls -lh "${ASSETS_DIR}"/*.safetensors 2>/dev/null | head -3
+    echo ""
+    if [[ -f "${TRT_ENGINE_DIR}/conditional_decoder.engine" ]]; then
+        echo "TRT Vocoder:"
+        ls -lh "${TRT_ENGINE_DIR}"/*.engine
         echo ""
     fi
-
-    echo "Architecture:"
-    echo "  - T3 runs as native Triton vLLM backend (high-performance token generation)"
-    echo "  - Chatterbox Python backend calls T3 via gRPC, runs S3Gen locally"
-    echo "  - Progressive streaming: chunks 4,8,16,32,32 with diffusion steps 1,2,5,7,10"
+    echo "Voices:"
+    if [[ -f "${T3_WEIGHTS_DIR}/voices/voices.json" ]]; then
+        cat "${T3_WEIGHTS_DIR}/voices/voices.json"
+    else
+        echo "  (none compiled)"
+    fi
     echo ""
     echo "Next steps:"
     echo "  1. Start Triton: docker compose up -d triton"
     echo "  2. Start worker: docker compose up -d worker"
     echo ""
-    echo "Cleanup options:"
-    echo "  $0 cleanup            # Remove downloads, keep model"
-    echo "  $0 cleanup --engines  # Rebuild TRT engines"
-    echo "  $0 cleanup --t3       # Remove T3 weights"
-    echo "  $0 cleanup --all      # Remove everything"
 }
 
 # =============================================================================
 # Main
 # =============================================================================
 main() {
-    # Stage 0: Download ONNX models
-    if [[ $START_STAGE -le 0 && $STOP_STAGE -ge 0 ]]; then
-        stage_download
-    fi
-
-    # Stage 1: Build TensorRT engines
-    if [[ $START_STAGE -le 1 && $STOP_STAGE -ge 1 ]]; then
-        stage_build_engines
-    fi
-
-    # Stage 2: Create Triton model repository
-    if [[ $START_STAGE -le 2 && $STOP_STAGE -ge 2 ]]; then
-        stage_create_repo
-    fi
-
-    # Stage 3: Build T3 for vLLM
-    if [[ $START_STAGE -le 3 && $STOP_STAGE -ge 3 ]]; then
-        stage_build_t3
-    fi
-
+    download_t3
+    download_assets
+    build_trt_vocoder
+    compile_voices
+    create_triton_configs
     show_summary
 }
 
