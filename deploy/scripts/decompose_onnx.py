@@ -384,6 +384,56 @@ def check_custom_ops(model_path: str) -> list:
     return custom_ops
 
 
+def decompose_with_raw_onnx(input_path: str, output_path: str) -> bool:
+    """
+    Fallback: Use raw ONNX manipulation without graphsurgeon.
+    This is simpler but less robust.
+    """
+    try:
+        import onnx
+        from onnx import helper, TensorProto
+
+        print(f"Loading ONNX model: {input_path}")
+        model = onnx.load(input_path)
+        graph = model.graph
+
+        # Find Microsoft ops
+        ms_nodes = [(i, node) for i, node in enumerate(graph.node)
+                    if node.domain == "com.microsoft"]
+
+        if not ms_nodes:
+            print("No Microsoft ops found")
+            onnx.save(model, output_path)
+            return True
+
+        print(f"Found {len(ms_nodes)} Microsoft ops")
+
+        # For each MS op, clear the domain to try standard ONNX
+        # This won't work for all ops but might for some
+        modified = False
+        for idx, node in ms_nodes:
+            if node.op_type == "BiasGelu":
+                # BiasGelu can sometimes work as standard Gelu with preprocessing
+                # For now, just try clearing domain
+                node.domain = ""
+                node.op_type = "Gelu"  # Hope ONNX has it
+                print(f"  Converted BiasGelu -> Gelu: {node.name}")
+                modified = True
+            elif node.op_type == "MultiHeadAttention":
+                # Can't easily convert MHA without graphsurgeon
+                print(f"  Cannot convert MultiHeadAttention without graphsurgeon: {node.name}")
+
+        if modified:
+            onnx.save(model, output_path)
+            print(f"Saved (partial conversion): {output_path}")
+
+        return False  # Partial conversion, likely still has issues
+
+    except Exception as e:
+        print(f"Raw ONNX manipulation failed: {e}")
+        return False
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Decompose Microsoft ONNX custom ops for TensorRT"
@@ -413,9 +463,13 @@ def main():
     for op, count in custom_ops.items():
         print(f"  {op}: {count}")
 
-    # Decompose
-    print(f"\nDecomposing custom ops...")
+    # Try graphsurgeon first
+    print(f"\nDecomposing custom ops with GraphSurgeon...")
     success = decompose_with_graphsurgeon(str(input_path), str(output_path))
+
+    if not success:
+        print(f"\nGraphSurgeon failed, trying raw ONNX manipulation...")
+        success = decompose_with_raw_onnx(str(input_path), str(output_path))
 
     if success:
         # Verify
@@ -430,6 +484,9 @@ def main():
             print(f"Output: {output_path}")
     else:
         print(f"\nDecomposition failed.")
+        print(f"\nTo fix, try:")
+        print(f"  pip3.12 uninstall onnx onnx-graphsurgeon")
+        print(f"  pip3.12 install onnx==1.15.0 onnx-graphsurgeon==0.5.2")
         sys.exit(1)
 
 

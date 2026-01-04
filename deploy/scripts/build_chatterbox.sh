@@ -347,9 +347,11 @@ build_trt_vocoder() {
 
     log_info "Decomposing custom attention ops to standard ONNX..."
 
-    # Ensure ONNX tools are installed
+    # Ensure ONNX tools are installed (pin compatible versions)
+    # onnx-graphsurgeon requires specific onnx version for bfloat16 support
     log_info "Installing ONNX dependencies..."
-    pip3.12 install onnx onnx-graphsurgeon onnxruntime onnxsim protobuf numpy 2>&1 | grep -v "already satisfied" || true
+    pip3.12 uninstall -y onnx onnx-graphsurgeon 2>/dev/null || true
+    pip3.12 install "onnx==1.15.0" "onnx-graphsurgeon==0.5.2" protobuf numpy 2>&1 | grep -v "already satisfied" || true
 
     python3.12 "${SCRIPT_DIR}/decompose_onnx.py" \
         --input "${onnx_dir}/${onnx_file}" \
