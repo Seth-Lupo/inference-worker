@@ -19,6 +19,9 @@ FROM nvcr.io/nvidia/tritonserver:25.04-py3
 ENV XFORMERS_DISABLE_MEMORY_EFFICIENT_ATTENTION=1
 ENV DIFFUSERS_NO_XFORMERS=1
 
+# Force vLLM V0 engine - V1 cannot run in Triton's background threads
+ENV VLLM_USE_V1=0
+
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
         espeak-ng \
@@ -33,12 +36,12 @@ RUN pip install --no-cache-dir --force-reinstall numpy
 # Install Triton client for BLS (Python backend calling other Triton models)
 RUN pip install --no-cache-dir tritonclient[grpc]
 
-# Install vLLM (this pulls compatible PyTorch automatically)
-RUN pip install --no-cache-dir vllm
+# Install vLLM 0.8.1 (matches NVIDIA 25.04 container API that T3 code expects)
+RUN pip install --no-cache-dir vllm==0.8.1
 
-# Install vLLM backend for Triton
+# Install vLLM backend for Triton (r25.04 branch matches vLLM 0.8.1)
 RUN mkdir -p /opt/tritonserver/backends/vllm && \
-    git clone https://github.com/triton-inference-server/vllm_backend.git /tmp/vllm_backend && \
+    git clone --branch r25.04 --depth 1 https://github.com/triton-inference-server/vllm_backend.git /tmp/vllm_backend && \
     cp -r /tmp/vllm_backend/src/* /opt/tritonserver/backends/vllm && \
     rm -rf /tmp/vllm_backend
 

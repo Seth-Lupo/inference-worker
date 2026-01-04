@@ -65,7 +65,8 @@ services:
     environment:
       - CUDA_VISIBLE_DEVICES=0
       - HF_TOKEN=${HF_TOKEN}
-      # vLLM settings
+      # vLLM settings - V1 engine cannot run in Triton's background threads
+      - VLLM_USE_V1=0
       - VLLM_ATTENTION_BACKEND=FLASHINFER
       # Chatterbox settings (Python backend calls T3 via gRPC)
       - TRITON_GRPC_URL=localhost:8001
