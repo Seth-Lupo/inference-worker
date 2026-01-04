@@ -106,7 +106,11 @@ class TritonPythonModel:
 
         self.token_frame_rate = 25
         self.flow_pre_lookahead_len = 3
-        self.token_hop_len = 15
+        # Tuned for minimum TTFA while ensuring hift produces audio:
+        # - Need ~50 mel frames minimum for hift to work
+        # - 25 tokens * 2 mel/token = 50 mel frames
+        self.token_hop_len = 25  # Was 15, but that gave silent first chunk
+        self.max_token_hop_len = 50  # Cap to keep mel chunks < 150 frames (hift limit)
 
         spk_info_path = os.path.join(model_params["model_dir"], "spk2info.pt")
         if not os.path.exists(spk_info_path):
@@ -433,7 +437,9 @@ class TritonPythonModel:
                         self.logger.log_info(f"chunk_index: {chunk_index}, current_token_hop_len: {this_token_hop_len}")
 
                         if self.dynamic_chunk_strategy == "exponential":
-                            this_token_hop_len = self.token_frame_rate * (2 ** chunk_index)
+                            # For low latency, keep constant chunk size instead of growing
+                            # Exponential growth increases latency on later chunks
+                            this_token_hop_len = self.token_hop_len
                         elif self.dynamic_chunk_strategy == "time_based":
                             # see https://github.com/qi-hua/async_cosyvoice/blob/main/model.py#L306
                             cost_time = time.time() - start_time
@@ -451,6 +457,7 @@ class TritonPythonModel:
                                     else:
                                         this_token_hop_len = self.token_hop_len
                                     this_token_hop_len = max(self.token_hop_len, this_token_hop_len)
+                                    this_token_hop_len = min(this_token_hop_len, self.max_token_hop_len)
                         chunk_index += 1
                     else:
                         time.sleep(0.02)
