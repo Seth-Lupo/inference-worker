@@ -36,16 +36,16 @@ RUN pip install --no-cache-dir --force-reinstall numpy
 # Install Triton client for BLS (Python backend calling other Triton models)
 RUN pip install --no-cache-dir tritonclient[grpc]
 
-# Install vLLM 0.9.2 (required for chatterbox-vllm T3 model)
-RUN pip install --no-cache-dir vllm==0.9.2 compressed-tensors
+# Install latest vLLM (for r25.12 backend compatibility)
+RUN pip install --no-cache-dir vllm compressed-tensors
 
 # Install chatterbox-vllm for T3 speech token generation
 # This provides vLLM-compatible T3 model that auto-registers
 RUN pip install --no-cache-dir chatterbox-vllm
 
-# Install vLLM backend for Triton (main branch for vLLM 0.9.x compatibility)
+# Install vLLM backend for Triton (r25.12 - latest release)
 RUN mkdir -p /opt/tritonserver/backends/vllm && \
-    git clone --depth 1 https://github.com/triton-inference-server/vllm_backend.git /tmp/vllm_backend && \
+    git clone --branch r25.12 --depth 1 https://github.com/triton-inference-server/vllm_backend.git /tmp/vllm_backend && \
     cp -r /tmp/vllm_backend/src/* /opt/tritonserver/backends/vllm && \
     rm -rf /tmp/vllm_backend
 
