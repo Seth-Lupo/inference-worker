@@ -13,7 +13,7 @@
 #
 # Use base Triton Python container - install vLLM ourselves for ABI compatibility
 # All packages from pip will have matching ABIs
-FROM nvcr.io/nvidia/tritonserver:25.04-py3
+FROM nvcr.io/nvidia/tritonserver:25.12-py3
 
 # Disable xformers to avoid triton kernel compatibility issues
 ENV XFORMERS_DISABLE_MEMORY_EFFICIENT_ATTENTION=1
@@ -37,7 +37,7 @@ RUN pip install --no-cache-dir --force-reinstall numpy
 RUN pip install --no-cache-dir tritonclient[grpc]
 
 # Install vLLM 0.8.4 (matches Triton 25.05) + compressed-tensors for AWQ support
-RUN pip install --no-cache-dir vllm==0.13.0 compressed-tensors
+RUN pip install --no-cache-dir vllm==0.9.1 compressed-tensors
 
 # Install vLLM backend for Triton (r25.05 matches vLLM 0.8.4)
 RUN mkdir -p /opt/tritonserver/backends/vllm && \

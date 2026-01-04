@@ -13,7 +13,7 @@ class T3Config(PretrainedConfig):
     def __init__(
         self,
         vocab_size: int = 8194,
-        hidden_size: int = 1024,
+        hidden_size: int = 2048,  # Doubled for CFG hack - vLLM allocates 2048, model uses 1024
         intermediate_size: int = 4096,
         num_hidden_layers: int = 30,
         num_attention_heads: int = 16,

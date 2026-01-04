@@ -1,474 +1,371 @@
-"""T3 Model for vLLM - Chatterbox Speech Token Generator.
-
-This model generates discrete speech tokens from text input.
-Conditioning (speaker embedding) is passed via the multimodal "image" input
-as base64-encoded tensor data for compatibility with Triton's vLLM backend.
+"""T3 vLLM Model - Chatterbox Speech Token Generator.
+Based on https://github.com/randombk/chatterbox-vllm
 """
-import base64
-import io
+from typing import Iterable, Mapping, Optional, Sequence, Union
 import os
-from typing import Iterable, List, Mapping, Optional, Tuple, Union
+import random
 
 import torch
 import torch.nn as nn
-from safetensors.torch import load_file
-from transformers import PreTrainedModel
+from transformers.feature_extraction_utils import BatchFeature
 
-from vllm.attention import Attention, AttentionMetadata
-from vllm.config import VllmConfig
-from vllm.distributed import get_pp_group
-from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (
-    MergedColumnParallelLinear,
-    QKVParallelLinear,
-    RowParallelLinear,
-)
+from vllm.config import VllmConfig, ModelConfig
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import get_sampler
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    ParallelLMHead,
-    VocabParallelEmbedding,
-)
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+from vllm.model_executor.models.interfaces import MultiModalEmbeddings, SupportsMultiModal
+from vllm.model_executor.models.interfaces_base import VllmModelForTextGeneration
+from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import NestedTensors
+from vllm.multimodal.inputs import MultiModalKwargs, MultiModalKwargsItem, MultiModalBatchedField
+from vllm.multimodal.parse import MultiModalDataParser, ModalityDataItems
 from vllm.multimodal.processing import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     MultiModalDataDict,
+    MultiModalDataItems,
     MultiModalFieldConfig,
     PromptUpdate,
+    MultiModalInputs,
+    PlaceholderRange,
 )
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 
-from .configuration_t3 import T3Config
+from .modules.learned_pos_emb import LearnedPositionEmbeddings
+from .modules.t3_config import T3Config
+from .modules.cond_enc import T3Cond, T3CondEnc
 
-# Speech token offset for distinguishing prefill vs decode tokens
-SPEECH_TOKEN_OFFSET = 2500
+
+PREFILL_COND_START_TOKEN = 695
+PREFILL_COND_END_TOKEN = 696
+PREFILL_END_TOKEN = 697
 CONDITIONING_SIZE = 34
+SPEECH_TOKEN_OFFSET = 2500
 
 
 class T3ProcessingInfo(BaseProcessingInfo):
-    """Processing info for T3 multimodal inputs."""
-
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
-        # Use "image" key for compatibility with Triton vLLM backend
-        return {"image": 1}
+        return {"conditionals": 1}
 
 
-class T3DummyInputsBuilder(BaseDummyInputsBuilder):
-    """Dummy inputs for profiling."""
-
+class T3MultiModalDummyInputsBuilder(BaseDummyInputsBuilder):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
-        return "[START]Hello world[STOP]"
+        return "[START]Hello, world![STOP]"
 
     def get_dummy_mm_data(self, seq_len: int, mm_counts: Mapping[str, int]) -> MultiModalDataDict:
-        # Dummy conditioning tensor
-        dummy_cond = torch.zeros(CONDITIONING_SIZE, 1024)
-        return {"image": [dummy_cond]}
+        return {"conditionals": [torch.zeros(CONDITIONING_SIZE, 2048)] * mm_counts["conditionals"]}
 
 
-class T3MultiModalProcessor(BaseMultiModalProcessor):
-    """Process multimodal inputs for T3.
+class T3MultiModalDataParser(MultiModalDataParser):
+    def parse_mm_data(self, mm_data: MultiModalDataDict) -> MultiModalDataItems:
+        conditionals = mm_data.get("conditionals", None)
+        if conditionals is None:
+            return MultiModalDataItems({})
+        return MultiModalDataItems({"conditionals": ConditionalsEmbeddingItems(conditionals)})
 
-    Conditioning is passed via "image" input for Triton vLLM backend compatibility.
-    The data can be:
-    - A torch.Tensor (direct conditioning embeddings)
-    - A base64-encoded string (serialized conditioning from Triton)
-    """
+
+class ConditionalsEmbeddingItems(ModalityDataItems[torch.Tensor, torch.Tensor]):
+    def __init__(self, data: torch.Tensor) -> None:
+        super().__init__(data, "conditionals")
+
+    def get_count(self) -> int:
+        return 1
+
+    def get(self, index: int) -> torch.Tensor:
+        assert index == 0
+        return self.data
+
+    def get_processor_data(self) -> Mapping[str, torch.Tensor]:
+        return {}
+
+    def get_passthrough_data(self) -> Mapping[str, torch.Tensor]:
+        return {"conditionals": self.data}
+
+
+def create_triangular_matrix(m, n):
+    row_indices = torch.arange(m).unsqueeze(1)
+    col_indices = torch.arange(n).unsqueeze(0)
+    matrix = (col_indices <= row_indices).float()
+    return matrix
+
+
+class T3MultiModalProcessor(BaseMultiModalProcessor[T3ProcessingInfo]):
+    def _get_data_parser(self) -> MultiModalDataParser:
+        return T3MultiModalDataParser()
 
     def _get_mm_fields_config(
         self,
-        hf_inputs,
-        hf_processor_mm_kwargs,
+        hf_inputs: BatchFeature,
+        hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
-        return {}
+        return dict(conditionals=MultiModalFieldConfig.batched("conditionals"))
 
     def _get_prompt_updates(
         self,
-        mm_data: MultiModalDataDict,
+        mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-        mm_processor_kwargs: Mapping[str, object],
-    ) -> Mapping[str, PromptUpdate]:
-        return {}
+        out_mm_kwargs: MultiModalKwargs,
+    ) -> Sequence[PromptUpdate]:
+        return []
+
+    def _call_hf_processor(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        tokenizer = self.info.get_tokenizer()
+        processed_outputs = tokenizer(prompt, return_tensors="pt")
+        processed_outputs['conditionals'] = mm_data.get('conditionals', None)
+        return processed_outputs
 
     def apply(
         self,
-        prompt: str,
+        prompt: Union[str, list[int]],
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> Tuple:
-        # Process conditioning from "image" input
-        images = mm_data.get("image", [])
-        conditioning = None
-
-        if images:
-            img_data = images[0]
-            if isinstance(img_data, torch.Tensor):
-                conditioning = img_data
-            elif isinstance(img_data, str):
-                # Base64-encoded tensor from Triton
-                try:
-                    decoded = base64.b64decode(img_data)
-                    buffer = io.BytesIO(decoded)
-                    conditioning = torch.load(buffer, weights_only=True)
-                except Exception:
-                    conditioning = None
-            elif isinstance(img_data, bytes):
-                try:
-                    buffer = io.BytesIO(img_data)
-                    conditioning = torch.load(buffer, weights_only=True)
-                except Exception:
-                    conditioning = None
-
-        return prompt, {"conditioning": conditioning}
-
-
-class T3MLP(nn.Module):
-    """T3 MLP layer (SwiGLU)."""
-
-    def __init__(self, config: T3Config):
-        super().__init__()
-        self.hidden_size = config.hidden_size
-        self.intermediate_size = config.intermediate_size
-        self.gate_up_proj = MergedColumnParallelLinear(
-            config.hidden_size,
-            [config.intermediate_size] * 2,
-            bias=config.mlp_bias,
-        )
-        self.down_proj = RowParallelLinear(
-            config.intermediate_size,
-            config.hidden_size,
-            bias=config.mlp_bias,
-        )
-        self.act_fn = SiluAndMul()
-
-    def forward(self, x):
-        gate_up, _ = self.gate_up_proj(x)
-        x = self.act_fn(gate_up)
-        x, _ = self.down_proj(x)
-        return x
-
-
-class T3Attention(nn.Module):
-    """T3 Attention layer."""
-
-    def __init__(self, config: T3Config, layer_idx: int):
-        super().__init__()
-        self.config = config
-        self.layer_idx = layer_idx
-        self.hidden_size = config.hidden_size
-        self.num_heads = config.num_attention_heads
-        self.head_dim = config.head_dim
-        self.num_kv_heads = config.num_key_value_heads
-        self.rope_theta = config.rope_theta
-        self.max_position_embeddings = config.max_position_embeddings
-
-        self.qkv_proj = QKVParallelLinear(
-            config.hidden_size,
-            self.head_dim,
-            self.num_heads,
-            self.num_kv_heads,
-            bias=config.attention_bias,
-        )
-        self.o_proj = RowParallelLinear(
-            self.num_heads * self.head_dim,
-            config.hidden_size,
-            bias=config.attention_bias,
+        tokenization_kwargs: Optional[Mapping[str, object]] = None,
+        return_mm_hashes: bool = False,
+    ) -> MultiModalInputs:
+        mm_items = self._to_mm_items(mm_data)
+        (prompt_ids, mm_kwargs, mm_hashes, is_update_applied) = self._apply_hf_processor(
+            prompt, mm_items, hf_processor_mm_kwargs, tokenization_kwargs, return_mm_hashes=False,
         )
 
-        self.rotary_emb = get_rope(
-            self.head_dim,
-            rotary_dim=self.head_dim,
-            max_position=config.max_position_embeddings,
-            base=config.rope_theta,
-            rope_scaling=config.rope_scaling,
-        )
-        self.attn = Attention(
-            self.num_heads,
-            self.head_dim,
-            self.num_heads // self.num_kv_heads,
-        )
-
-    def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
-    ) -> torch.Tensor:
-        qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v = qkv.split(
-            [
-                self.num_heads * self.head_dim,
-                self.num_kv_heads * self.head_dim,
-                self.num_kv_heads * self.head_dim,
-            ],
-            dim=-1,
-        )
-        q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
-        output, _ = self.o_proj(attn_output)
-        return output
-
-
-class T3DecoderLayer(nn.Module):
-    """T3 Transformer Decoder Layer."""
-
-    def __init__(self, config: T3Config, layer_idx: int):
-        super().__init__()
-        self.hidden_size = config.hidden_size
-        self.self_attn = T3Attention(config, layer_idx)
-        self.mlp = T3MLP(config)
-        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-
-    def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
-        residual: Optional[torch.Tensor],
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        if residual is None:
-            residual = hidden_states
-            hidden_states = self.input_layernorm(hidden_states)
-        else:
-            hidden_states, residual = self.input_layernorm(hidden_states, residual)
-
-        hidden_states = self.self_attn(
-            positions=positions,
-            hidden_states=hidden_states,
-            kv_cache=kv_cache,
-            attn_metadata=attn_metadata,
-        )
-
-        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
-        hidden_states = self.mlp(hidden_states)
-        return hidden_states, residual
-
-
-class T3Model(nn.Module):
-    """T3 Transformer Model."""
-
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__()
-        config = vllm_config.model_config.hf_config
-        self.config = config
-        self.padding_idx = config.pad_token_id if hasattr(config, 'pad_token_id') else None
-        self.vocab_size = config.vocab_size
-
-        self.embed_tokens = VocabParallelEmbedding(
-            config.vocab_size,
-            config.hidden_size,
-        )
-        self.layers = nn.ModuleList([
-            T3DecoderLayer(config, i) for i in range(config.num_hidden_layers)
-        ])
-        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-
-        # Load pre-computed conditioning if available
-        self.conditioning = None
-        if hasattr(config, 'conditioning_path') and config.conditioning_path:
-            try:
-                if os.path.exists(config.conditioning_path):
-                    self.conditioning = torch.load(
-                        config.conditioning_path, weights_only=True
-                    )
-                    print(f"T3: Loaded pre-computed conditioning from {config.conditioning_path}")
-            except Exception as e:
-                print(f"T3: Failed to load conditioning: {e}")
-
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.embed_tokens(input_ids)
-
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
-        if inputs_embeds is not None:
-            hidden_states = inputs_embeds
-        else:
-            hidden_states = self.get_input_embeddings(input_ids)
-
-        residual = None
-        for i, layer in enumerate(self.layers):
-            hidden_states, residual = layer(
-                positions,
-                hidden_states,
-                kv_caches[i],
-                attn_metadata,
-                residual,
-            )
-        hidden_states, _ = self.norm(hidden_states, residual)
-        return hidden_states
-
-
-@MULTIMODAL_REGISTRY.register_processor(
-    T3MultiModalProcessor,
-    info=T3ProcessingInfo,
-    dummy_inputs=T3DummyInputsBuilder,
-)
-class T3ForCausalLM(nn.Module):
-    """T3 for Causal Language Modeling - Speech Token Generation.
-
-    This model generates speech tokens from text, with optional speaker conditioning.
-    For use with Triton's vLLM backend, conditioning is passed via "image" input.
-    """
-
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__()
-        config = vllm_config.model_config.hf_config
-        self.config = config
-        self.vllm_config = vllm_config
-
-        self.model = T3Model(vllm_config=vllm_config, prefix=prefix)
-        self.lm_head = ParallelLMHead(
-            config.vocab_size,
-            config.hidden_size,
-            bias=False,
-        )
-        self.logits_processor = LogitsProcessor(config.vocab_size)
-        self.sampler = get_sampler()
-
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
-
-    def get_multimodal_embeddings(self, **kwargs) -> Optional[NestedTensors]:
-        """Get conditioning embeddings from multimodal input."""
-        conditioning = kwargs.get("conditioning", None)
-
-        if conditioning is None:
-            # Fall back to pre-computed conditioning
-            conditioning = self.model.conditioning
-
-        if conditioning is not None:
-            if not isinstance(conditioning, torch.Tensor):
-                conditioning = torch.tensor(conditioning)
-            return [conditioning.unsqueeze(0)]
-
-        return None
-
-    def get_input_processor(self):
-        return T3MultiModalProcessor(self.config, self.vllm_config.model_config)
-
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-        **kwargs,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
-        # Get conditioning embeddings if available
-        mm_embeddings = self.get_multimodal_embeddings(**kwargs)
-
-        if mm_embeddings is not None and inputs_embeds is None:
-            # Prepend conditioning to input embeddings
-            text_embeds = self.get_input_embeddings(input_ids)
-            cond_embeds = mm_embeddings[0].to(text_embeds.device, text_embeds.dtype)
-            inputs_embeds = torch.cat([cond_embeds, text_embeds], dim=0)
-            # Adjust positions
-            cond_len = cond_embeds.shape[0]
-            positions = positions + cond_len
-
-        hidden_states = self.model(
-            input_ids,
-            positions,
-            kv_caches,
-            attn_metadata,
-            intermediate_tensors,
-            inputs_embeds,
-        )
-        return hidden_states
-
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> torch.Tensor:
-        logits = self.logits_processor(self.lm_head, hidden_states, sampling_metadata)
-        return logits
-
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[torch.Tensor]:
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
-
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> set:
-        """Load model weights from safetensors."""
-        stacked_params_mapping = [
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
-            ("gate_up_proj", "gate_proj", 0),
-            ("gate_up_proj", "up_proj", 1),
+        final_prompt_ids = [
+            PREFILL_COND_START_TOKEN,
+            *([prompt_ids[0]] * (CONDITIONING_SIZE-2)),
+            PREFILL_COND_END_TOKEN,
+            *prompt_ids,
+            PREFILL_END_TOKEN,
         ]
 
-        params_dict = dict(self.named_parameters())
-        loaded = set()
+        conditionals = mm_data.get("conditionals", None)
+        assert conditionals is not None and len(conditionals) > 0
+        assert len(conditionals) == 1
+        assert conditionals[0].shape[0] == CONDITIONING_SIZE
 
-        for name, loaded_weight in weights:
-            # Handle name mapping from T3 weights to vLLM format
-            if name.startswith("lm."):
-                name = name[3:]  # Remove "lm." prefix
+        new_conditionals = torch.cat([
+            conditionals[0],
+            create_triangular_matrix(len(prompt_ids), conditionals[0].shape[1]).to(conditionals[0].device),
+            torch.zeros(1, conditionals[0].shape[1]).to(conditionals[0].device),
+        ], dim=0)
 
-            # Map layer names
-            if "layers." in name:
-                name = name.replace("layers.", "model.layers.")
+        new_mm_kwargs = MultiModalKwargs.from_items([
+            MultiModalKwargsItem.from_elems(
+                MultiModalBatchedField().build_elems(
+                    modality="conditionals",
+                    key="conditionals",
+                    data=[new_conditionals],
+                )
+            )
+        ])
 
-            if "embed_tokens" in name:
-                name = name.replace("embed_tokens", "model.embed_tokens")
+        return MultiModalInputs(
+            type="multimodal",
+            prompt=prompt,
+            prompt_token_ids=final_prompt_ids,
+            mm_kwargs=new_mm_kwargs,
+            mm_hashes={"conditionals": [str(random.random())]},
+            mm_placeholders={"conditionals": [PlaceholderRange(offset=0, length=len(final_prompt_ids), is_embed=None)]},
+        )
 
-            if "norm." in name and "layernorm" not in name:
-                name = name.replace("norm.", "model.norm.")
 
-            if "lm_head" in name:
-                name = "lm_head.weight"
+@MULTIMODAL_REGISTRY.register_processor(T3MultiModalProcessor,
+                                        info=T3ProcessingInfo,
+                                        dummy_inputs=T3MultiModalDummyInputsBuilder)
+class T3ForCausalLM(nn.Module, VllmModelForTextGeneration, SupportsMultiModal):
+    """Native vLLM implementation of Chatterbox T3."""
 
-            # Handle stacked params
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name in name:
-                    name = name.replace(weight_name, param_name)
-                    if name in params_dict:
-                        param = params_dict[name]
-                        weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                        weight_loader(param, loaded_weight, shard_id)
-                        loaded.add(name)
-                    break
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str):
+        super().__init__()
+        vllm_config.model_config.hf_config.hidden_size = 1024
+        self.vllm_config = vllm_config
+        self.cfg: ModelConfig = vllm_config.model_config
+
+        self.tfmr = LlamaModel(vllm_config=vllm_config, prefix=prefix + ".tfmr")
+
+        text_tokens_dict_size = 704
+
+        self.t3conf = T3Config()
+        self.dim = self.t3conf.n_channels
+        self.cond_enc = T3CondEnc(self.t3conf)
+        self.text_emb = nn.Embedding(text_tokens_dict_size, self.dim)
+        self.speech_emb = nn.Embedding(self.t3conf.speech_tokens_dict_size, self.dim)
+
+        max_text_seq_len = self.t3conf.max_text_tokens + 2
+        self.text_pos_emb = LearnedPositionEmbeddings(max_text_seq_len, self.dim)
+
+        max_mel_seq_len = self.t3conf.max_speech_tokens + 2 + 2
+        self.speech_pos_emb = LearnedPositionEmbeddings(max_mel_seq_len, self.dim)
+
+        self.speech_head = ParallelLMHead(
+            num_embeddings=self.t3conf.speech_tokens_dict_size,
+            embedding_dim=self.dim,
+            padding_size=1,
+            prefix=prefix + ".speech_head",
+        )
+        self.logits_processor = LogitsProcessor(self.t3conf.speech_tokens_dict_size)
+
+        self.cfg_scale = float(os.environ.get("CHATTERBOX_CFG_SCALE", "0.5"))
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        loaded_params: set[str] = set()
+        state_dicts = {}
+        hf_llama_weights = {}
+
+        for name, weight in weights:
+            if name.startswith("tfmr."):
+                subname = name[5:]
+                hf_llama_weights[subname] = weight
+                continue
+            loaded_params.add(name)
+            attr, subname = name.split('.', 1)
+            state_dict = state_dicts.get(attr, {})
+            state_dict[subname] = weight
+            state_dicts[attr] = state_dict
+
+        for attr, state_dict in state_dicts.items():
+            if hasattr(self, attr):
+                getattr(self, attr).load_state_dict(state_dict)
+
+        llama_loaded_params = self.tfmr.load_weights(hf_llama_weights.items())
+        loaded_params.update('tfmr.' + i for i in llama_loaded_params)
+
+        text_position_ids = torch.arange(self.t3conf.max_text_tokens + 2, device=self.text_pos_emb.emb.weight.device)
+        self.precomputed_text_pos_emb = self.text_pos_emb.get_fixed_embedding(text_position_ids)[0]
+
+        speech_position_ids = torch.arange(self.t3conf.max_speech_tokens + 2 + 2, device=self.speech_pos_emb.emb.weight.device)
+        self.precomputed_speech_pos_emb = self.speech_pos_emb.get_fixed_embedding(speech_position_ids)[0]
+
+        return loaded_params
+
+    def get_multimodal_embeddings(self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+        conditionals = kwargs.get("conditionals", [])
+        return [batch[0] for batch in conditionals]
+
+    def split_prefill_decode(self, input_ids: torch.Tensor, multimodal_embeddings: list) -> list:
+        if len(input_ids) == 0:
+            return []
+
+        remaining_multimodal_embeddings = torch.cat(multimodal_embeddings, dim=0)
+        in_prefill_block = input_ids[0] < SPEECH_TOKEN_OFFSET
+        output = []
+        buffer = []
+
+        for input_id in input_ids:
+            if (in_prefill_block != (input_id < SPEECH_TOKEN_OFFSET)) or (input_id == PREFILL_COND_START_TOKEN):
+                if buffer:
+                    if in_prefill_block:
+                        mme, remaining_multimodal_embeddings = remaining_multimodal_embeddings.split(
+                            [len(buffer), len(remaining_multimodal_embeddings) - len(buffer)], dim=0)
+                        output.append((torch.tensor(buffer).to(input_ids.device), mme))
+                    else:
+                        output.append((torch.tensor(buffer).to(input_ids.device), None))
+                buffer = []
+                in_prefill_block = (input_id < SPEECH_TOKEN_OFFSET)
+            buffer.append(input_id)
+
+        if buffer:
+            if in_prefill_block:
+                mme, remaining_multimodal_embeddings = remaining_multimodal_embeddings.split(
+                    [len(buffer), len(remaining_multimodal_embeddings) - len(buffer)], dim=0)
+                output.append((torch.tensor(buffer).to(input_ids.device), mme))
             else:
-                if name in params_dict:
-                    param = params_dict[name]
-                    weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                    weight_loader(param, loaded_weight)
-                    loaded.add(name)
+                output.append((torch.tensor(buffer).to(input_ids.device), None))
 
-        return loaded
+        return output
 
+    def get_input_embeddings(self, input_ids: torch.Tensor, multimodal_embeddings=None) -> torch.Tensor:
+        if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
+            embeds = self.speech_emb(input_ids - SPEECH_TOKEN_OFFSET)
+            return torch.cat([embeds, embeds], dim=1)
 
-# Register T3 with vLLM's model registry for custom model support
-try:
-    from vllm.model_executor.models.registry import ModelRegistry
-    ModelRegistry.register_model("T3ForCausalLM", T3ForCausalLM)
-except (ImportError, AttributeError):
-    # Fallback for different vLLM versions
-    try:
-        from vllm.model_executor.models import _MODELS
-        _MODELS["T3ForCausalLM"] = T3ForCausalLM
-    except ImportError:
-        pass
+        out = []
+        for ids, multimodal_embedding in self.split_prefill_decode(input_ids, multimodal_embeddings):
+            if multimodal_embedding is None:
+                embeds = self.speech_emb(ids - SPEECH_TOKEN_OFFSET)
+                out.append(torch.cat([embeds, embeds], dim=1))
+                continue
+
+            if ids[0] == PREFILL_COND_START_TOKEN and ids[-1] == PREFILL_END_TOKEN:
+                text_ids = ids[CONDITIONING_SIZE:-1]
+                text_emb = self.text_emb(text_ids) + self.precomputed_text_pos_emb[0:len(text_ids)]
+                start_of_speech_token = torch.tensor([self.t3conf.start_speech_token]).to(ids.device)
+                start_of_speech_emb = self.speech_emb(start_of_speech_token.unsqueeze(0))[0] + self.precomputed_speech_pos_emb[0:1]
+                conditioning_emb = multimodal_embedding[0:CONDITIONING_SIZE]
+                cond_embeds = torch.cat([conditioning_emb, text_emb, start_of_speech_emb], dim=0)
+                uncond_embeds = torch.cat([conditioning_emb, torch.zeros_like(text_emb), start_of_speech_emb], dim=0)
+                out.append(torch.cat([cond_embeds, uncond_embeds], dim=1))
+
+            elif ids[0] == PREFILL_COND_START_TOKEN:
+                text_ids = ids[CONDITIONING_SIZE:]
+                text_emb = self.text_emb(text_ids) + self.precomputed_text_pos_emb[0:len(text_ids)]
+                conditioning_emb = multimodal_embedding[0:min(CONDITIONING_SIZE, len(multimodal_embedding))]
+                cond_embeds = torch.cat([conditioning_emb, text_emb], dim=0)
+                uncond_embeds = torch.cat([conditioning_emb, torch.zeros_like(text_emb)], dim=0)
+                out.append(torch.cat([cond_embeds, uncond_embeds], dim=1))
+
+            elif ids[-1] == PREFILL_END_TOKEN:
+                indices = torch.where(ids == PREFILL_COND_END_TOKEN)[0]
+                if len(indices) > 0:
+                    text_ids = ids[indices[0]+1:-1]
+                    text_emb = self.text_emb(text_ids) + self.precomputed_text_pos_emb[0:len(text_ids)]
+                    start_of_speech_token = torch.tensor([self.t3conf.start_speech_token]).to(ids.device)
+                    start_of_speech_emb = self.speech_emb(start_of_speech_token.unsqueeze(0))[0] + self.precomputed_speech_pos_emb[0:1]
+                    conditioning_emb = multimodal_embedding[:indices[0]+1]
+                    cond_embeds = torch.cat([conditioning_emb, text_emb, start_of_speech_emb], dim=0)
+                    uncond_embeds = torch.cat([conditioning_emb, torch.zeros_like(text_emb), start_of_speech_emb], dim=0)
+                    out.append(torch.cat([cond_embeds, uncond_embeds], dim=1))
+                else:
+                    text_ids = ids[:-1]
+                    text_pos = torch.sum(multimodal_embedding[0:len(text_ids)], dim=1) - 1
+                    text_emb = self.text_emb(text_ids) + self.precomputed_text_pos_emb[text_pos.tolist()]
+                    start_of_speech_token = torch.tensor([self.t3conf.start_speech_token]).to(ids.device)
+                    start_of_speech_emb = self.speech_emb(start_of_speech_token.unsqueeze(0))[0] + self.precomputed_speech_pos_emb[0:1]
+                    cond_embeds = torch.cat([text_emb, start_of_speech_emb], dim=0)
+                    uncond_embeds = torch.cat([torch.zeros_like(text_emb), start_of_speech_emb], dim=0)
+                    out.append(torch.cat([cond_embeds, uncond_embeds], dim=1))
+            else:
+                raise ValueError(f"Unknown prefill block: {ids}")
+
+        return torch.cat(out, dim=0)
+
+    def compute_logits(self, hidden_states: torch.Tensor, sampling_metadata: SamplingMetadata) -> torch.Tensor:
+        cond_hidden_states, uncond_hidden_states = hidden_states.split([self.dim, self.dim], dim=1)
+        cond_logits = self.logits_processor(self.speech_head, cond_hidden_states, sampling_metadata)
+        uncond_logits = self.logits_processor(self.speech_head, uncond_hidden_states, sampling_metadata)
+        logits = cond_logits + self.cfg_scale * (cond_logits - uncond_logits)
+        logits = torch.cat([
+            torch.zeros(logits.shape[0], SPEECH_TOKEN_OFFSET).to(logits.device).fill_(float('-inf')),
+            logits,
+        ], dim=1)
+        return logits
+
+    def forward(
+        self,
+        input_ids: Optional[torch.Tensor],
+        positions: torch.Tensor,
+        intermediate_tensors: Optional[IntermediateTensors],
+        inputs_embeds: Optional[torch.Tensor] = None,
+        **kwargs: object,
+    ) -> torch.Tensor:
+        if inputs_embeds is None:
+            inputs_embeds = self.get_input_embeddings(input_ids, [])
+
+        cond_embeds, uncond_embeds = inputs_embeds.split([self.dim, self.dim], dim=1)
+
+        hidden_states = self.tfmr(
+            input_ids=None,
+            positions=torch.cat([positions, positions], dim=0),
+            intermediate_tensors=None,
+            inputs_embeds=torch.cat([cond_embeds, uncond_embeds], dim=0)
+        )
+
+        hidden_state_1, hidden_state_2 = hidden_states.split([len(cond_embeds), len(uncond_embeds)], dim=0)
+        return torch.cat([hidden_state_1, hidden_state_2], dim=1)
+
+    def get_language_model(self) -> torch.nn.Module:
+        return self.tfmr
