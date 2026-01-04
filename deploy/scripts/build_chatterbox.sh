@@ -11,7 +11,7 @@
 #   ./build_chatterbox.sh              # Build everything
 #   ./build_chatterbox.sh cleanup      # Clean up
 #
-# Container: nvcr.io/nvidia/tritonserver:24.12-vllm-python-py3
+# Container: nvcr.io/nvidia/tritonserver:25.12-vllm-python-py3
 # =============================================================================
 
 set -euo pipefail
