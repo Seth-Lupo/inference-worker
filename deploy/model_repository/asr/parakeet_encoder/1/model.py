@@ -39,28 +39,38 @@ class TritonPythonModel:
             ('CUDAExecutionProvider', {
                 'device_id': 0,
                 'arena_extend_strategy': 'kSameAsRequested',
-                'gpu_mem_limit': 256 * 1024 * 1024,  # 256MB
+                'gpu_mem_limit': 128 * 1024 * 1024,  # 128MB - minimal
                 'cudnn_conv_use_max_workspace': False,
                 'do_copy_in_default_stream': True,
+                'enable_cuda_graph': False,
+                'tunable_op_enable': False,
             }),
             'CPUExecutionProvider'
         ]
 
         sess_options = ort.SessionOptions()
-        sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_BASIC
+        sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL  # No optimization to reduce memory
         sess_options.enable_mem_reuse = True
+        sess_options.enable_cpu_mem_arena = False
+        sess_options.enable_mem_pattern = False
 
         # Retry with delay to handle GPU memory contention during parallel model loading
         import time
-        max_retries = 5
+        max_retries = 8
         for attempt in range(max_retries):
             try:
+                # Try to free any stale GPU memory before each attempt
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
+
                 self.session = ort.InferenceSession(onnx_path, sess_options, providers=providers)
                 break
             except Exception as e:
                 if attempt < max_retries - 1 and "memory" in str(e).lower():
                     pb_utils.Logger.log_info(f"Parakeet Encoder: GPU memory contention, retry {attempt + 1}/{max_retries}")
-                    time.sleep(3)
+                    time.sleep(4)
                 else:
                     raise
 
