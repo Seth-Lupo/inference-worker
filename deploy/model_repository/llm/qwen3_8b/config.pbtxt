@@ -6,7 +6,7 @@
 
 name: "qwen3_8b"
 backend: "tensorrtllm"
-max_batch_size: 8
+max_batch_size: 4
 
 model_transaction_policy {
   decoupled: true
@@ -104,12 +104,24 @@ parameters {
 
 parameters {
   key: "batch_scheduler_policy"
-  value: { string_value: "max_utilization" }
+  value: { string_value: "guaranteed_no_evict" }
+}
+parameters {
+  key: "enable_chunked_context"
+  value: { string_value: "true" }
+}
+parameters {
+  key: "cancellation_check_period_ms"
+  value: { string_value: "50" }
 }
 
 parameters {
   key: "kv_cache_free_gpu_mem_fraction"
-  value: { string_value: "0.5" }
+  value: { string_value: "0.45" }
+}
+parameters {
+  key: "kv_cache_enable_block_reuse"
+  value: { string_value: "true" }
 }
 
 parameters {

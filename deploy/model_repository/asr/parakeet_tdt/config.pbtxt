@@ -33,8 +33,10 @@ instance_group [
 ]
 
 dynamic_batching {
-  preferred_batch_size: [ 1, 2, 4 ]
-  max_queue_delay_microseconds: 50000
+  preferred_batch_size: [ 1 ]
+  max_queue_delay_microseconds: 1000
+  priority_levels: 2
+  default_priority_level: 1
 }
 
 version_policy: { latest: { num_versions: 1 } }
