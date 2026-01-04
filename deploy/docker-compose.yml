@@ -85,14 +85,15 @@ services:
       --model-repository=/models/tts
       --model-repository=/models/asr
       --model-control-mode=explicit
+      --model-load-thread-count=1
+      --load-model=parakeet_decoder
+      --load-model=parakeet_encoder
+      --load-model=parakeet_tdt
+      --load-model=chatterbox_s3gen
+      --load-model=chatterbox_voice_encoder
+      --load-model=chatterbox
       --load-model=qwen3
       --load-model=t3
-      --load-model=chatterbox
-      --load-model=chatterbox_voice_encoder
-      --load-model=chatterbox_s3gen
-      --load-model=parakeet_encoder
-      --load-model=parakeet_decoder
-      --load-model=parakeet_tdt
       --disable-auto-complete-config
       --http-port=8000
       --grpc-port=8001
