@@ -2,9 +2,13 @@
 """
 Decompose Microsoft custom ONNX ops to standard ops for TensorRT compatibility.
 
-The ResembleAI chatterbox ONNX models use com.microsoft::MultiHeadAttention
-which TensorRT doesn't support. This script decomposes it to standard ops:
-  MatMul + Add + Reshape + Transpose + Softmax + MatMul
+The ResembleAI chatterbox ONNX models use:
+  - com.microsoft::MultiHeadAttention
+  - com.microsoft::BiasGelu
+
+This script replaces them with standard ONNX ops:
+  - MultiHeadAttention → MatMul + Softmax + MatMul (scaled dot-product attention)
+  - BiasGelu → Add + Gelu
 
 Usage:
     python decompose_onnx.py --input model.onnx --output model_decomposed.onnx
@@ -17,115 +21,9 @@ from pathlib import Path
 import numpy as np
 
 
-def decompose_multihead_attention(graph, node, num_heads=None):
+def decompose_with_graphsurgeon(input_path: str, output_path: str) -> bool:
     """
-    Decompose com.microsoft::MultiHeadAttention to standard ONNX ops.
-
-    Microsoft MHA signature:
-        Inputs: query, key, value, [bias], [key_padding_mask], [attn_bias], ...
-        Outputs: output, [present_key], [present_value]
-
-    We decompose to:
-        Q = query @ Wq + bq  (or just query if already projected)
-        K = key @ Wk + bk
-        V = value @ Wv + bv
-
-        # Reshape to [batch, heads, seq, head_dim]
-        Q = reshape(Q, [batch, seq, heads, head_dim]).transpose(0, 2, 1, 3)
-        K = reshape(K, [batch, seq, heads, head_dim]).transpose(0, 2, 1, 3)
-        V = reshape(V, [batch, seq, heads, head_dim]).transpose(0, 2, 1, 3)
-
-        # Scaled dot-product attention
-        scores = (Q @ K.T) / sqrt(head_dim)
-        attn = softmax(scores, axis=-1)
-        out = attn @ V
-
-        # Reshape back
-        out = out.transpose(0, 2, 1, 3).reshape(batch, seq, hidden)
-    """
-    import onnx_graphsurgeon as gs
-
-    # Get node attributes
-    attrs = {attr.name: attr for attr in node.attrs}
-    num_heads = num_heads or attrs.get('num_heads', 8)
-
-    # Get inputs
-    query = node.inputs[0]
-    key = node.inputs[1] if len(node.inputs) > 1 else query
-    value = node.inputs[2] if len(node.inputs) > 2 else key
-
-    # Create unique names for intermediate tensors
-    prefix = node.name or "mha"
-
-    # For now, we'll use a simpler approach:
-    # Use ONNX's Attention op if available, or fall back to MatMul decomposition
-
-    # Try using standard Attention pattern that TRT recognizes
-    # TensorRT's ONNX parser looks for specific patterns
-
-    return None  # Signal that we need alternative approach
-
-
-def try_onnxruntime_optimize(input_path: str, output_path: str) -> bool:
-    """
-    Try using ONNX Runtime's transformer optimizer to decompose attention.
-    This is the most reliable method as it handles all the weight transformations.
-    """
-    try:
-        # Try newer onnxruntime API first
-        try:
-            from onnxruntime.transformers import optimizer
-            from onnxruntime.transformers.fusion_options import FusionOptions
-
-            # Disable attention fusion to get decomposed ops
-            opts = FusionOptions('bert')
-            opts.enable_attention = False
-            opts.enable_flash_attention = False
-            opts.enable_packed_kv = False
-            opts.enable_packed_qkv = False
-
-            optimized = optimizer.optimize_model(
-                input_path,
-                model_type='bert',  # Generic transformer
-                opt_level=0,  # Minimal optimization
-                optimization_options=opts,
-                use_gpu=False,
-            )
-
-            optimized.save_model_to_file(output_path)
-            print(f"Optimized with ONNX Runtime: {output_path}")
-            return True
-
-        except ImportError:
-            # Try older onnxruntime-tools API
-            from onnxruntime_tools import optimizer
-            from onnxruntime_tools.transformers.fusion_options import FusionOptions
-
-            opts = FusionOptions('bert')
-            opts.enable_attention = False
-
-            optimized = optimizer.optimize_model(
-                input_path,
-                model_type='bert',
-                opt_level=0,
-                optimization_options=opts,
-            )
-
-            optimized.save_model_to_file(output_path)
-            print(f"Optimized with onnxruntime-tools: {output_path}")
-            return True
-
-    except ImportError as e:
-        print(f"onnxruntime.transformers not available: {e}")
-        return False
-    except Exception as e:
-        print(f"ONNX Runtime optimization failed: {e}")
-        return False
-
-
-def try_graphsurgeon_decompose(input_path: str, output_path: str) -> bool:
-    """
-    Use ONNX GraphSurgeon to manually decompose MultiHeadAttention.
+    Use ONNX GraphSurgeon to replace Microsoft custom ops with standard ops.
     """
     try:
         import onnx
@@ -135,94 +33,59 @@ def try_graphsurgeon_decompose(input_path: str, output_path: str) -> bool:
         model = onnx.load(input_path)
         graph = gs.import_onnx(model)
 
-        # Find all Microsoft MHA nodes
-        mha_nodes = [
-            node for node in graph.nodes
-            if node.op == "MultiHeadAttention" and node.domain == "com.microsoft"
-        ]
+        # Count ops before
+        ms_ops_before = sum(1 for n in graph.nodes if n.domain == "com.microsoft")
+        print(f"Microsoft ops before: {ms_ops_before}")
 
-        if not mha_nodes:
-            print("No Microsoft MultiHeadAttention nodes found")
-            onnx.save(model, output_path)
-            return True
+        nodes_to_remove = []
+        nodes_to_add = []
 
-        print(f"Found {len(mha_nodes)} MultiHeadAttention nodes to decompose")
+        for node in graph.nodes:
+            if node.domain != "com.microsoft":
+                continue
 
-        for node in mha_nodes:
-            # Get the node's attributes
-            num_heads = None
-            for attr in node.attrs:
-                if attr == 'num_heads':
-                    num_heads = node.attrs[attr]
-                    break
+            if node.op == "BiasGelu":
+                # BiasGelu(input, bias) = Gelu(Add(input, bias))
+                new_nodes = replace_bias_gelu(node, graph)
+                if new_nodes:
+                    nodes_to_remove.append(node)
+                    nodes_to_add.extend(new_nodes)
 
-            print(f"  Processing: {node.name}, heads={num_heads}")
-            print(f"    Inputs: {[i.name for i in node.inputs]}")
-            print(f"    Outputs: {[o.name for o in node.outputs]}")
+            elif node.op == "MultiHeadAttention":
+                # This is complex - for now, try to use standard Attention pattern
+                new_nodes = replace_multihead_attention(node, graph)
+                if new_nodes:
+                    nodes_to_remove.append(node)
+                    nodes_to_add.extend(new_nodes)
 
-            # For Microsoft MHA, the inputs are typically:
-            # 0: query (B, S, H) or (B, S, N*H)
-            # 1: key
-            # 2: value
-            # 3: bias (optional, packed QKV bias)
-            # 4: key_padding_mask (optional)
-            # 5: attention_bias (optional)
+        # Remove old nodes and add new ones
+        for node in nodes_to_remove:
+            graph.nodes.remove(node)
+        graph.nodes.extend(nodes_to_add)
 
-            query = node.inputs[0]
-            key = node.inputs[1] if len(node.inputs) > 1 and node.inputs[1] is not None else query
-            value = node.inputs[2] if len(node.inputs) > 2 and node.inputs[2] is not None else key
-
-            # Get shapes if available
-            q_shape = query.shape if hasattr(query, 'shape') and query.shape else None
-            print(f"    Query shape: {q_shape}")
-
-            if q_shape and len(q_shape) >= 2:
-                # Infer dimensions
-                # Typically: [batch, seq_len, hidden_dim] or [batch, seq_len, num_heads * head_dim]
-                hidden_dim = q_shape[-1] if isinstance(q_shape[-1], int) else 512
-                if num_heads:
-                    head_dim = hidden_dim // num_heads
-                else:
-                    head_dim = 64  # Common default
-                    num_heads = hidden_dim // head_dim
-            else:
-                # Use defaults
-                num_heads = num_heads or 8
-                head_dim = 64
-                hidden_dim = num_heads * head_dim
-
-            print(f"    Dimensions: heads={num_heads}, head_dim={head_dim}, hidden={hidden_dim}")
-
-            # Create scale constant
-            scale = 1.0 / np.sqrt(head_dim)
-            scale_const = gs.Constant(
-                name=f"{node.name}_scale",
-                values=np.array([scale], dtype=np.float32)
-            )
-
-            # Create decomposed attention using standard ops
-            # This is a simplified version - full implementation would handle:
-            # - Separate Q/K/V projections if needed
-            # - Attention masks
-            # - Causal masking
-
-            # For now, we'll try a different approach:
-            # Replace the domain to see if TRT has a compatible plugin
-            node.domain = ""  # Try empty domain (standard ONNX)
-
-        # Clean up the graph
+        # Clean up
         graph.cleanup().toposort()
+
+        # Count ops after
+        ms_ops_after = sum(1 for n in graph.nodes if n.domain == "com.microsoft")
+        print(f"Microsoft ops after: {ms_ops_after}")
+        print(f"Replaced: {ms_ops_before - ms_ops_after} ops")
 
         # Export
         model = gs.export_onnx(graph)
-        onnx.save(model, output_path)
-        print(f"Saved decomposed model: {output_path}")
-        return True
 
-    except ImportError as e:
-        print(f"Missing dependency: {e}")
-        print("Install with: pip install onnx onnx-graphsurgeon")
-        return False
+        # Run shape inference to fix any issues
+        try:
+            from onnx import shape_inference
+            model = shape_inference.infer_shapes(model)
+        except Exception as e:
+            print(f"Shape inference failed (non-fatal): {e}")
+
+        onnx.save(model, output_path)
+        print(f"Saved: {output_path}")
+
+        return ms_ops_after == 0
+
     except Exception as e:
         print(f"GraphSurgeon decomposition failed: {e}")
         import traceback
@@ -230,39 +93,280 @@ def try_graphsurgeon_decompose(input_path: str, output_path: str) -> bool:
         return False
 
 
-def try_onnx_simplifier(input_path: str, output_path: str) -> bool:
+def replace_bias_gelu(node, graph):
     """
-    Try using onnx-simplifier to optimize the model.
-    Sometimes this can help resolve custom op issues.
+    Replace BiasGelu with Add + GELU (decomposed to basic ops).
+
+    BiasGelu(input, bias) -> Add(input, bias) then GELU
+
+    GELU(x) ≈ 0.5 * x * (1 + tanh(sqrt(2/π) * (x + 0.044715 * x³)))
+
+    Decomposed to basic ops TensorRT supports:
+      t1 = x * x * x
+      t2 = x + 0.044715 * t1
+      t3 = sqrt(2/π) * t2  (sqrt(2/π) ≈ 0.7978845608)
+      t4 = tanh(t3)
+      t5 = 1 + t4
+      t6 = 0.5 * x * t5
     """
-    try:
-        import onnx
-        from onnxsim import simplify
+    import onnx_graphsurgeon as gs
 
-        print(f"Simplifying with onnx-simplifier...")
-        model = onnx.load(input_path)
+    if len(node.inputs) < 2:
+        print(f"  Skipping {node.name}: expected 2 inputs, got {len(node.inputs)}")
+        return None
 
-        # Skip shape inference for custom ops
-        model_simplified, check = simplify(
-            model,
-            skip_shape_inference=True,
-            skip_constant_folding=False,
-        )
+    input_tensor = node.inputs[0]
+    bias_tensor = node.inputs[1]
+    output_tensor = node.outputs[0]
 
-        if check:
-            onnx.save(model_simplified, output_path)
-            print(f"Simplified model saved: {output_path}")
-            return True
+    new_nodes = []
+
+    # Constants
+    const_044715 = gs.Constant(f"{node.name}_044715", values=np.array([0.044715], dtype=np.float32))
+    const_sqrt2pi = gs.Constant(f"{node.name}_sqrt2pi", values=np.array([0.7978845608], dtype=np.float32))
+    const_half = gs.Constant(f"{node.name}_half", values=np.array([0.5], dtype=np.float32))
+    const_one = gs.Constant(f"{node.name}_one", values=np.array([1.0], dtype=np.float32))
+
+    # x = input + bias
+    x = gs.Variable(name=f"{node.name}_x")
+    new_nodes.append(gs.Node(op="Add", name=f"{node.name}_add", inputs=[input_tensor, bias_tensor], outputs=[x]))
+
+    # t1 = x * x
+    x_sq = gs.Variable(name=f"{node.name}_x_sq")
+    new_nodes.append(gs.Node(op="Mul", name=f"{node.name}_sq", inputs=[x, x], outputs=[x_sq]))
+
+    # t2 = x * x * x = x_sq * x
+    x_cube = gs.Variable(name=f"{node.name}_x_cube")
+    new_nodes.append(gs.Node(op="Mul", name=f"{node.name}_cube", inputs=[x_sq, x], outputs=[x_cube]))
+
+    # t3 = 0.044715 * x³
+    t3 = gs.Variable(name=f"{node.name}_t3")
+    new_nodes.append(gs.Node(op="Mul", name=f"{node.name}_mul_044715", inputs=[const_044715, x_cube], outputs=[t3]))
+
+    # t4 = x + t3
+    t4 = gs.Variable(name=f"{node.name}_t4")
+    new_nodes.append(gs.Node(op="Add", name=f"{node.name}_add_t3", inputs=[x, t3], outputs=[t4]))
+
+    # t5 = sqrt(2/π) * t4
+    t5 = gs.Variable(name=f"{node.name}_t5")
+    new_nodes.append(gs.Node(op="Mul", name=f"{node.name}_mul_sqrt2pi", inputs=[const_sqrt2pi, t4], outputs=[t5]))
+
+    # t6 = tanh(t5)
+    t6 = gs.Variable(name=f"{node.name}_t6")
+    new_nodes.append(gs.Node(op="Tanh", name=f"{node.name}_tanh", inputs=[t5], outputs=[t6]))
+
+    # t7 = 1 + t6
+    t7 = gs.Variable(name=f"{node.name}_t7")
+    new_nodes.append(gs.Node(op="Add", name=f"{node.name}_add_one", inputs=[const_one, t6], outputs=[t7]))
+
+    # t8 = 0.5 * x
+    t8 = gs.Variable(name=f"{node.name}_t8")
+    new_nodes.append(gs.Node(op="Mul", name=f"{node.name}_mul_half", inputs=[const_half, x], outputs=[t8]))
+
+    # output = t8 * t7 = 0.5 * x * (1 + tanh(...))
+    new_nodes.append(gs.Node(op="Mul", name=f"{node.name}_final", inputs=[t8, t7], outputs=[output_tensor]))
+
+    print(f"  Replaced BiasGelu: {node.name} ({len(new_nodes)} nodes)")
+    return new_nodes
+
+
+def replace_multihead_attention(node, graph):
+    """
+    Replace Microsoft MultiHeadAttention with standard ONNX ops.
+
+    MS MHA inputs:
+      0: query [batch, seq_q, hidden]
+      1: key [batch, seq_k, hidden] (optional, defaults to query)
+      2: value [batch, seq_v, hidden] (optional, defaults to key)
+      3: bias (optional, packed QKV bias)
+      4: key_padding_mask (optional)
+      5: attention_bias (optional)
+
+    MS MHA attributes:
+      - num_heads: number of attention heads
+      - scale: attention scale (usually 1/sqrt(head_dim))
+
+    We decompose to standard scaled dot-product attention:
+      Q, K, V = split(input) or use provided
+      scores = softmax(Q @ K.T * scale)
+      output = scores @ V
+    """
+    import onnx_graphsurgeon as gs
+
+    # Get attributes
+    num_heads = node.attrs.get("num_heads", 8)
+    scale = node.attrs.get("scale", None)
+
+    # Get inputs
+    query = node.inputs[0]
+    key = node.inputs[1] if len(node.inputs) > 1 and node.inputs[1].name else query
+    value = node.inputs[2] if len(node.inputs) > 2 and node.inputs[2].name else key
+
+    # Get output
+    output = node.outputs[0]
+
+    # For the chatterbox model, Q/K/V are already projected
+    # We just need to reshape, do attention, and reshape back
+
+    # Infer dimensions
+    # Query shape is typically [batch, seq, num_heads * head_dim]
+    q_shape = query.shape
+    if q_shape is None or len(q_shape) < 3:
+        print(f"  Skipping {node.name}: cannot infer query shape")
+        return None
+
+    # Try to get hidden dim
+    hidden_dim = q_shape[-1] if isinstance(q_shape[-1], int) else None
+    if hidden_dim is None:
+        # Use scale to infer head_dim: scale = 1/sqrt(head_dim)
+        if scale:
+            head_dim = int(round(1.0 / (scale * scale)))
+            hidden_dim = head_dim * num_heads
         else:
-            print("Simplification check failed")
-            return False
+            hidden_dim = 512  # Default
+            head_dim = hidden_dim // num_heads
 
-    except ImportError:
-        print("onnx-simplifier not available")
-        return False
-    except Exception as e:
-        print(f"Simplification failed: {e}")
-        return False
+    head_dim = hidden_dim // num_heads
+    if scale is None:
+        scale = 1.0 / np.sqrt(head_dim)
+
+    print(f"  MHA {node.name}: heads={num_heads}, hidden={hidden_dim}, head_dim={head_dim}, scale={scale}")
+
+    # Create scale constant
+    scale_const = gs.Constant(
+        name=f"{node.name}_scale",
+        values=np.array([scale], dtype=np.float32),
+    )
+
+    # Shape constants for reshape
+    # [batch, seq, hidden] -> [batch, seq, num_heads, head_dim] -> [batch, num_heads, seq, head_dim]
+    reshape_qkv_shape = gs.Constant(
+        name=f"{node.name}_reshape_shape",
+        values=np.array([0, -1, num_heads, head_dim], dtype=np.int64),
+    )
+
+    # For output: [batch, num_heads, seq, head_dim] -> [batch, seq, num_heads, head_dim] -> [batch, seq, hidden]
+    reshape_out_shape = gs.Constant(
+        name=f"{node.name}_reshape_out_shape",
+        values=np.array([0, -1, hidden_dim], dtype=np.int64),
+    )
+
+    new_nodes = []
+
+    # Reshape Q: [B, S, H] -> [B, S, heads, head_dim]
+    q_reshaped = gs.Variable(name=f"{node.name}_q_reshaped")
+    new_nodes.append(gs.Node(
+        op="Reshape",
+        name=f"{node.name}_reshape_q",
+        inputs=[query, reshape_qkv_shape],
+        outputs=[q_reshaped],
+    ))
+
+    # Transpose Q: [B, S, heads, head_dim] -> [B, heads, S, head_dim]
+    q_transposed = gs.Variable(name=f"{node.name}_q_transposed")
+    new_nodes.append(gs.Node(
+        op="Transpose",
+        name=f"{node.name}_transpose_q",
+        inputs=[q_reshaped],
+        outputs=[q_transposed],
+        attrs={"perm": [0, 2, 1, 3]},
+    ))
+
+    # Reshape K
+    k_reshaped = gs.Variable(name=f"{node.name}_k_reshaped")
+    new_nodes.append(gs.Node(
+        op="Reshape",
+        name=f"{node.name}_reshape_k",
+        inputs=[key, reshape_qkv_shape],
+        outputs=[k_reshaped],
+    ))
+
+    # Transpose K: [B, S, heads, head_dim] -> [B, heads, head_dim, S] (for matmul)
+    k_transposed = gs.Variable(name=f"{node.name}_k_transposed")
+    new_nodes.append(gs.Node(
+        op="Transpose",
+        name=f"{node.name}_transpose_k",
+        inputs=[k_reshaped],
+        outputs=[k_transposed],
+        attrs={"perm": [0, 2, 3, 1]},  # Note: different from Q to get K^T
+    ))
+
+    # Reshape V
+    v_reshaped = gs.Variable(name=f"{node.name}_v_reshaped")
+    new_nodes.append(gs.Node(
+        op="Reshape",
+        name=f"{node.name}_reshape_v",
+        inputs=[value, reshape_qkv_shape],
+        outputs=[v_reshaped],
+    ))
+
+    # Transpose V: [B, S, heads, head_dim] -> [B, heads, S, head_dim]
+    v_transposed = gs.Variable(name=f"{node.name}_v_transposed")
+    new_nodes.append(gs.Node(
+        op="Transpose",
+        name=f"{node.name}_transpose_v",
+        inputs=[v_reshaped],
+        outputs=[v_transposed],
+        attrs={"perm": [0, 2, 1, 3]},
+    ))
+
+    # Q @ K^T: [B, heads, S_q, head_dim] @ [B, heads, head_dim, S_k] -> [B, heads, S_q, S_k]
+    qk_matmul = gs.Variable(name=f"{node.name}_qk")
+    new_nodes.append(gs.Node(
+        op="MatMul",
+        name=f"{node.name}_matmul_qk",
+        inputs=[q_transposed, k_transposed],
+        outputs=[qk_matmul],
+    ))
+
+    # Scale: scores = QK * scale
+    scores_scaled = gs.Variable(name=f"{node.name}_scores_scaled")
+    new_nodes.append(gs.Node(
+        op="Mul",
+        name=f"{node.name}_scale",
+        inputs=[qk_matmul, scale_const],
+        outputs=[scores_scaled],
+    ))
+
+    # Softmax over last axis
+    attn_weights = gs.Variable(name=f"{node.name}_attn_weights")
+    new_nodes.append(gs.Node(
+        op="Softmax",
+        name=f"{node.name}_softmax",
+        inputs=[scores_scaled],
+        outputs=[attn_weights],
+        attrs={"axis": -1},
+    ))
+
+    # Attention @ V: [B, heads, S_q, S_k] @ [B, heads, S_k, head_dim] -> [B, heads, S_q, head_dim]
+    attn_output = gs.Variable(name=f"{node.name}_attn_out")
+    new_nodes.append(gs.Node(
+        op="MatMul",
+        name=f"{node.name}_matmul_v",
+        inputs=[attn_weights, v_transposed],
+        outputs=[attn_output],
+    ))
+
+    # Transpose back: [B, heads, S, head_dim] -> [B, S, heads, head_dim]
+    output_transposed = gs.Variable(name=f"{node.name}_out_transposed")
+    new_nodes.append(gs.Node(
+        op="Transpose",
+        name=f"{node.name}_transpose_out",
+        inputs=[attn_output],
+        outputs=[output_transposed],
+        attrs={"perm": [0, 2, 1, 3]},
+    ))
+
+    # Reshape: [B, S, heads, head_dim] -> [B, S, hidden]
+    new_nodes.append(gs.Node(
+        op="Reshape",
+        name=f"{node.name}_reshape_out",
+        inputs=[output_transposed, reshape_out_shape],
+        outputs=[output],
+    ))
+
+    print(f"  Replaced MultiHeadAttention: {node.name} ({len(new_nodes)} nodes)")
+    return new_nodes
 
 
 def check_custom_ops(model_path: str) -> list:
@@ -270,13 +374,14 @@ def check_custom_ops(model_path: str) -> list:
     import onnx
 
     model = onnx.load(model_path)
-    custom_ops = []
+    custom_ops = {}
 
     for node in model.graph.node:
         if node.domain and node.domain not in ('', 'ai.onnx', 'ai.onnx.ml'):
-            custom_ops.append(f"{node.domain}::{node.op_type}")
+            key = f"{node.domain}::{node.op_type}"
+            custom_ops[key] = custom_ops.get(key, 0) + 1
 
-    return list(set(custom_ops))
+    return custom_ops
 
 
 def main():
@@ -285,10 +390,6 @@ def main():
     )
     parser.add_argument("--input", "-i", required=True, help="Input ONNX file")
     parser.add_argument("--output", "-o", required=True, help="Output ONNX file")
-    parser.add_argument("--method", "-m",
-                       choices=["auto", "onnxruntime", "graphsurgeon", "simplify"],
-                       default="auto",
-                       help="Decomposition method")
     args = parser.parse_args()
 
     input_path = Path(args.input)
@@ -299,56 +400,37 @@ def main():
         sys.exit(1)
 
     # Check what custom ops we're dealing with
-    print(f"Checking custom ops in {input_path}...")
+    print(f"Analyzing: {input_path}")
     custom_ops = check_custom_ops(str(input_path))
-    if custom_ops:
-        print(f"Custom ops found: {custom_ops}")
-    else:
+
+    if not custom_ops:
         print("No custom ops found - model should be TRT compatible")
-        # Just copy the file
         import shutil
         shutil.copy(input_path, output_path)
         sys.exit(0)
 
-    # Try decomposition methods
-    success = False
+    print(f"Custom ops found:")
+    for op, count in custom_ops.items():
+        print(f"  {op}: {count}")
 
-    if args.method == "auto":
-        # Try methods in order of reliability
-        methods = [
-            ("ONNX Runtime optimizer", try_onnxruntime_optimize),
-            ("GraphSurgeon decomposition", try_graphsurgeon_decompose),
-            ("ONNX Simplifier", try_onnx_simplifier),
-        ]
+    # Decompose
+    print(f"\nDecomposing custom ops...")
+    success = decompose_with_graphsurgeon(str(input_path), str(output_path))
 
-        for name, method in methods:
-            print(f"\nTrying {name}...")
-            if method(str(input_path), str(output_path)):
-                success = True
-                # Verify no custom ops remain
-                remaining = check_custom_ops(str(output_path))
-                if remaining:
-                    print(f"Warning: Custom ops still present: {remaining}")
-                else:
-                    print("Success: No custom ops in output")
-                break
+    if success:
+        # Verify
+        remaining = check_custom_ops(str(output_path))
+        if remaining:
+            print(f"\nWarning: Some custom ops remain:")
+            for op, count in remaining.items():
+                print(f"  {op}: {count}")
+            sys.exit(1)
+        else:
+            print(f"\nSuccess! All custom ops decomposed.")
+            print(f"Output: {output_path}")
     else:
-        method_map = {
-            "onnxruntime": try_onnxruntime_optimize,
-            "graphsurgeon": try_graphsurgeon_decompose,
-            "simplify": try_onnx_simplifier,
-        }
-        success = method_map[args.method](str(input_path), str(output_path))
-
-    if not success:
-        print("\nAll decomposition methods failed.")
-        print("Options:")
-        print("  1. Install onnxruntime-tools: pip install onnxruntime-tools")
-        print("  2. Use --no-trt flag to skip TensorRT build")
-        print("  3. Export ONNX from PyTorch without custom ops")
+        print(f"\nDecomposition failed.")
         sys.exit(1)
-
-    print(f"\nDecomposed model saved to: {output_path}")
 
 
 if __name__ == "__main__":

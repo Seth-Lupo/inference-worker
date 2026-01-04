@@ -341,20 +341,22 @@ build_trt_vocoder() {
     # Decompose Microsoft custom ops to standard ONNX ops
     # The original ONNX uses com.microsoft::MultiHeadAttention which TRT doesn't support
     # This converts it to standard MatMul + Softmax ops while preserving weights
-    if [[ ! -f "${onnx_dir}/${onnx_decomposed}" ]]; then
-        log_info "Decomposing custom attention ops to standard ONNX..."
 
-        # Ensure ONNX tools are installed
-        log_info "Installing ONNX dependencies..."
-        pip3.12 install onnx onnx-graphsurgeon onnxruntime onnxsim protobuf numpy 2>&1 | grep -v "already satisfied" || true
+    # Always re-decompose to pick up script changes
+    rm -f "${onnx_dir}/${onnx_decomposed}"
 
-        python3.12 "${SCRIPT_DIR}/decompose_onnx.py" \
-            --input "${onnx_dir}/${onnx_file}" \
-            --output "${onnx_dir}/${onnx_decomposed}" || {
-            log_warn "ONNX decomposition failed - trying direct TRT build..."
-            onnx_decomposed="$onnx_file"
-        }
-    fi
+    log_info "Decomposing custom attention ops to standard ONNX..."
+
+    # Ensure ONNX tools are installed
+    log_info "Installing ONNX dependencies..."
+    pip3.12 install onnx onnx-graphsurgeon onnxruntime onnxsim protobuf numpy 2>&1 | grep -v "already satisfied" || true
+
+    python3.12 "${SCRIPT_DIR}/decompose_onnx.py" \
+        --input "${onnx_dir}/${onnx_file}" \
+        --output "${onnx_dir}/${onnx_decomposed}" || {
+        log_warn "ONNX decomposition failed - trying direct TRT build..."
+        onnx_decomposed="$onnx_file"
+    }
 
     # Build TensorRT engine
     # Shapes: progressive chunks 4,8,16,32,32 tokens -> min=4, opt=32, max=64
