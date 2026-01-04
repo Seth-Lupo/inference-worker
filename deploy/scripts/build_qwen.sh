@@ -53,16 +53,11 @@ if [[ "${1:-}" == "cleanup" || "${1:-}" == "clean" ]]; then
         --all|-a)
             log_warn "Removing downloaded weights..."
             rm -rf "$WEIGHTS_DIR"
-            log_info "To clear HF cache: rm -rf ${HF_CACHE}/hub/models--${HF_REPO//\//__}"
-            ;;
-        --cache|-c)
-            log_warn "Clearing HuggingFace cache for ${HF_REPO}..."
-            rm -rf "${HF_CACHE}/hub/models--${HF_REPO//\//__}"
+            log_info "Weights removed: ${WEIGHTS_DIR}"
             ;;
         *)
-            echo "Usage: $0 cleanup [--all|-a | --cache|-c]"
+            echo "Usage: $0 cleanup --all"
             echo "  --all    Remove local weights directory"
-            echo "  --cache  Clear HuggingFace cache for this model"
             ;;
     esac
     exit 0
