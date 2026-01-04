@@ -220,7 +220,8 @@ hf_clone() {
     fi
 
     log_info "Cloning ${repo} (with LFS)..."
-    GIT_LFS_SKIP_SMUDGE=0 git clone --depth 1 "$(hf_url "$repo")" "$output_dir"
+    # Disable terminal prompts - if auth needed, HF_TOKEN must be set
+    GIT_TERMINAL_PROMPT=0 GIT_LFS_SKIP_SMUDGE=0 git clone --depth 1 "$(hf_url "$repo")" "$output_dir"
 }
 
 # Clone a HuggingFace repo WITHOUT LFS files (fast clone, pull later)
@@ -242,7 +243,8 @@ hf_clone_shallow() {
     fi
 
     log_info "Cloning ${repo} (shallow, no LFS)..."
-    GIT_LFS_SKIP_SMUDGE=1 git clone --depth 1 "$(hf_url "$repo")" "$output_dir"
+    # Disable terminal prompts - if auth needed, HF_TOKEN must be set
+    GIT_TERMINAL_PROMPT=0 GIT_LFS_SKIP_SMUDGE=1 git clone --depth 1 "$(hf_url "$repo")" "$output_dir"
 }
 
 # Pull specific LFS files by pattern
