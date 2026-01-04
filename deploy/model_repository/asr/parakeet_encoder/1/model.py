@@ -60,7 +60,7 @@ class TritonPythonModel:
             except Exception as e:
                 if attempt < max_retries - 1 and "memory" in str(e).lower():
                     pb_utils.Logger.log_info(f"Parakeet Encoder: GPU memory contention, retry {attempt + 1}/{max_retries}")
-                    time.sleep(2)
+                    time.sleep(3)
                 else:
                     raise
 

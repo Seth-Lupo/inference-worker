@@ -84,6 +84,9 @@ class TritonPythonModel:
                         self.default_cond[k] = v.to(self.device)
             self.logger.log_info("  Loaded default conditioning")
 
+        # Release PyTorch cached memory to help other models (ONNX) allocate
+        torch.cuda.empty_cache()
+
         self.logger.log_info("S3Gen: Ready")
 
     def execute(self, requests):
