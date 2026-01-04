@@ -6,10 +6,153 @@
 
 
 from collections import OrderedDict
+import math
 import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint as cp
-import torchaudio.compliance.kaldi as Kaldi
+
+
+def _hz_to_mel(freq: float) -> float:
+    """Convert Hz to Mel scale."""
+    return 2595.0 * math.log10(1.0 + freq / 700.0)
+
+
+def _mel_to_hz(mel: float) -> float:
+    """Convert Mel scale to Hz."""
+    return 700.0 * (10.0 ** (mel / 2595.0) - 1.0)
+
+
+def _create_mel_filterbank(
+    num_mel_bins: int,
+    num_fft_bins: int,
+    sample_rate: int,
+    low_freq: float = 20.0,
+    high_freq: float = None,
+) -> torch.Tensor:
+    """Create mel filterbank matrix."""
+    if high_freq is None:
+        high_freq = sample_rate / 2.0
+
+    # Mel points
+    low_mel = _hz_to_mel(low_freq)
+    high_mel = _hz_to_mel(high_freq)
+    mel_points = torch.linspace(low_mel, high_mel, num_mel_bins + 2)
+    hz_points = torch.tensor([_mel_to_hz(m.item()) for m in mel_points])
+
+    # FFT bin frequencies
+    fft_bin_width = sample_rate / (2.0 * (num_fft_bins - 1))
+    bin_points = (hz_points / fft_bin_width).long()
+
+    # Create filterbank
+    filterbank = torch.zeros(num_mel_bins, num_fft_bins)
+    for i in range(num_mel_bins):
+        left = bin_points[i].item()
+        center = bin_points[i + 1].item()
+        right = bin_points[i + 2].item()
+
+        for j in range(left, center):
+            if center != left:
+                filterbank[i, j] = (j - left) / (center - left)
+        for j in range(center, right):
+            if right != center:
+                filterbank[i, j] = (right - j) / (right - center)
+
+    return filterbank
+
+
+def fbank_pure_torch(
+    waveform: torch.Tensor,
+    num_mel_bins: int = 80,
+    frame_length: float = 25.0,
+    frame_shift: float = 10.0,
+    sample_frequency: float = 16000.0,
+    dither: float = 0.0,
+    energy_floor: float = 1.0,
+    preemphasis_coefficient: float = 0.97,
+) -> torch.Tensor:
+    """
+    Compute filterbank features (Kaldi-compatible).
+
+    Args:
+        waveform: Audio tensor of shape (1, num_samples) or (num_samples,)
+        num_mel_bins: Number of mel bins
+        frame_length: Frame length in ms
+        frame_shift: Frame shift in ms
+        sample_frequency: Sample rate
+        dither: Dithering coefficient
+        energy_floor: Floor on energy
+        preemphasis_coefficient: Preemphasis coefficient
+
+    Returns:
+        Filterbank features of shape (num_frames, num_mel_bins)
+    """
+    if waveform.dim() == 1:
+        waveform = waveform.unsqueeze(0)
+
+    device = waveform.device
+    dtype = waveform.dtype
+
+    # Convert ms to samples
+    frame_length_samples = int(frame_length * sample_frequency / 1000.0)
+    frame_shift_samples = int(frame_shift * sample_frequency / 1000.0)
+
+    # Round to power of 2 for FFT
+    n_fft = 1
+    while n_fft < frame_length_samples:
+        n_fft *= 2
+
+    # Preemphasis
+    if preemphasis_coefficient > 0:
+        waveform = torch.cat([
+            waveform[:, :1],
+            waveform[:, 1:] - preemphasis_coefficient * waveform[:, :-1]
+        ], dim=1)
+
+    # Dithering
+    if dither > 0:
+        waveform = waveform + dither * torch.randn_like(waveform)
+
+    # Frame the signal
+    waveform = waveform.squeeze(0)
+    num_samples = waveform.shape[0]
+    num_frames = max(1, 1 + (num_samples - frame_length_samples) // frame_shift_samples)
+
+    # Pad if necessary
+    pad_length = (num_frames - 1) * frame_shift_samples + frame_length_samples - num_samples
+    if pad_length > 0:
+        waveform = F.pad(waveform, (0, pad_length))
+
+    # Create frames
+    frames = waveform.unfold(0, frame_length_samples, frame_shift_samples)
+
+    # Apply window
+    window = torch.hann_window(frame_length_samples, device=device, dtype=dtype)
+    frames = frames * window
+
+    # Pad to n_fft
+    if frame_length_samples < n_fft:
+        frames = F.pad(frames, (0, n_fft - frame_length_samples))
+
+    # FFT
+    spectrum = torch.fft.rfft(frames)
+    power_spectrum = (spectrum.real ** 2 + spectrum.imag ** 2)
+
+    # Apply energy floor
+    power_spectrum = torch.clamp(power_spectrum, min=energy_floor)
+
+    # Create mel filterbank
+    num_fft_bins = n_fft // 2 + 1
+    mel_filterbank = _create_mel_filterbank(
+        num_mel_bins, num_fft_bins, int(sample_frequency)
+    ).to(device=device, dtype=dtype)
+
+    # Apply mel filterbank
+    mel_energies = torch.matmul(power_spectrum, mel_filterbank.T)
+
+    # Log compression
+    mel_energies = torch.log(torch.clamp(mel_energies, min=energy_floor))
+
+    return mel_energies
 
 
 def pad_list(xs, pad_value):
@@ -47,7 +190,7 @@ def extract_feature(audio):
     feature_times = []
     feature_lengths = []
     for au in audio:
-        feature = Kaldi.fbank(au.unsqueeze(0), num_mel_bins=80)
+        feature = fbank_pure_torch(au.unsqueeze(0), num_mel_bins=80)
         feature = feature - feature.mean(dim=0, keepdim=True)
         features.append(feature)
         feature_times.append(au.shape[0])

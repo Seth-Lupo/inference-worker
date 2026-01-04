@@ -16,7 +16,7 @@ import logging
 
 import numpy as np
 import torch
-import torchaudio as ta
+import librosa
 from functools import lru_cache
 from typing import Optional
 from omegaconf import DictConfig
@@ -38,10 +38,29 @@ def drop_invalid_tokens(x):
     return x[x < SPEECH_VOCAB_SIZE]
 
 
-# TODO: global resampler cache
+class LibrosaResampler:
+    """Librosa-based resampler that mimics torchaudio.transforms.Resample interface."""
+    def __init__(self, src_sr: int, dst_sr: int):
+        self.src_sr = src_sr
+        self.dst_sr = dst_sr
+
+    def __call__(self, audio: torch.Tensor) -> torch.Tensor:
+        """Resample audio tensor using librosa."""
+        device = audio.device
+        dtype = audio.dtype
+        # Convert to numpy, resample, convert back
+        audio_np = audio.cpu().numpy()
+        resampled = librosa.resample(audio_np, orig_sr=self.src_sr, target_sr=self.dst_sr)
+        return torch.from_numpy(resampled).to(device=device, dtype=dtype)
+
+    def to(self, device):
+        """No-op for API compatibility."""
+        return self
+
+
 @lru_cache(100)
 def get_resampler(src_sr, dst_sr, device):
-    return ta.transforms.Resample(src_sr, dst_sr).to(device)
+    return LibrosaResampler(src_sr, dst_sr)
 
 
 class S3Token2Mel(torch.nn.Module):

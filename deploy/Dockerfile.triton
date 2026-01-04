@@ -5,6 +5,9 @@
 #
 # Base image already includes: torch, transformers, huggingface_hub, tokenizers,
 # safetensors, numpy (via vLLM). We only add what's missing.
+#
+# Note: torchaudio removed - replaced with pure torch/librosa implementations
+# to avoid ABI compatibility issues with base image torch.
 FROM nvcr.io/nvidia/tritonserver:25.08-vllm-python-py3
 
 # Install system dependencies
@@ -14,21 +17,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-# Get torch version from base image, install matching torchaudio
-# Use --no-deps to avoid pulling different torch version
-RUN TORCH_VERSION=$(pip show torch | grep Version | cut -d' ' -f2) && \
-    CUDA_VERSION=$(python3 -c "import torch; print(torch.version.cuda.replace('.', '')[:3])") && \
-    echo "Base image: torch==${TORCH_VERSION} CUDA=${CUDA_VERSION}" && \
-    pip install --no-cache-dir --no-deps \
-        torchaudio \
-        --index-url https://download.pytorch.org/whl/cu${CUDA_VERSION} && \
-    pip show torchaudio && \
-    python3 -c "import torchaudio; print(f'torchaudio {torchaudio.__version__} installed')"
-
 # Install Triton client for BLS (Python backend calling other Triton models)
 RUN pip install --no-cache-dir tritonclient[grpc]
 
 # Install audio processing libraries (not in base image)
+# librosa replaces torchaudio for resampling
 RUN pip install --no-cache-dir \
         librosa \
         soundfile \
