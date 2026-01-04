@@ -71,20 +71,21 @@ vllm:
 # -----------------------------------------------------------------------------
 # Architecture:
 #   - T3: vLLM backend (text + conditioning → speech tokens)
-#   - S3Gen: PyTorch (speech tokens → audio via flow matching + HiFiGAN)
+#   - S3Gen: PyTorch with torch.compile() (speech tokens → audio)
 #   - VoiceEncoder: PyTorch (reference audio → speaker embedding)
-#   - Vocoder: Optional TensorRT for HiFiGAN acceleration
 # -----------------------------------------------------------------------------
 chatterbox:
-  # HuggingFace repos
-  hf_repo: "ResembleAI/chatterbox"           # Main repo (weights)
-  hf_repo_onnx: "ResembleAI/chatterbox-turbo-ONNX"  # ONNX for TRT builds
+  # HuggingFace repo (weights only, no ONNX)
+  hf_repo: "ResembleAI/chatterbox"
 
   # Precision
   precision: "fp16"
 
   # Audio settings
   sample_rate: 24000
+
+  # Use torch.compile() for optimization
+  use_torch_compile: true
 
   # Triton paths (inside container)
   assets_path: "/models/tts/chatterbox_assets"
@@ -102,35 +103,19 @@ t3:
   enforce_eager: true  # Disable CUDA graphs for custom model
 
 # -----------------------------------------------------------------------------
-# S3Gen: Flow Matching Decoder + Vocoder
+# S3Gen: Flow Matching Decoder + HiFT Vocoder (Pure PyTorch)
 # -----------------------------------------------------------------------------
 s3gen:
-  # Flow matching (diffusion) settings
-  # Fixed steps for TensorRT, or variable for PyTorch
-  diffusion_steps: 4          # Fixed steps (for TRT unrolled engine)
-  diffusion_steps_trt: 4      # Steps baked into TRT engine
+  # All components run in PyTorch with torch.compile()
+  # - Flow decoder: speech tokens → mel spectrogram
+  # - HiFT vocoder: mel → audio waveform
 
-  # Progressive streaming (PyTorch only - variable steps per chunk)
-  # First chunks use fewer steps for lower latency
-  progressive_chunks: [4, 8, 16, 32, 32]    # Tokens per chunk
-  progressive_steps: [1, 2, 5, 7, 10]       # Diffusion steps per chunk
+  # Progressive streaming schedule
+  # Early chunks use fewer diffusion steps for lower latency
+  # Later chunks use more steps for better quality
+  progressive_chunks: [4, 8, 16, 32, 32, 32, 32, 32]  # Tokens per chunk
+  progressive_steps: [2, 3, 5, 7, 7, 7, 7, 7]         # Diffusion steps per chunk
 
-  # Vocoder backend: "trt" or "pytorch"
-  # TRT is faster but requires building the engine
-  vocoder_backend: "trt"
-
-  # TensorRT vocoder shapes (for conditional_decoder)
-  vocoder_shapes:
-    min: "speech_tokens:1x4"
-    opt: "speech_tokens:1x32"
-    max: "speech_tokens:1x64"
-
-  # Flow decoder TRT (optional - unrolled N steps)
-  # Set to true to build TRT engine with fixed diffusion_steps_trt
-  # This bakes N diffusion steps into a single TRT engine call
-  flow_decoder_trt: false
-  flow_decoder_shapes:
-    # Shapes for dynamic axes: latents, speaker_embedding, speech_token_embedding
-    min: "latents:1x128x16,speaker_embedding:1x256,speech_token_embedding:1x4x1024"
-    opt: "latents:1x128x64,speaker_embedding:1x256,speech_token_embedding:1x32x1024"
-    max: "latents:1x128x256,speaker_embedding:1x256,speech_token_embedding:1x128x1024"
+  # Steady state (after progressive schedule exhausted)
+  steady_chunk_size: 32
+  steady_diffusion_steps: 7

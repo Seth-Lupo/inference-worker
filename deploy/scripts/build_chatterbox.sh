@@ -2,15 +2,13 @@
 # =============================================================================
 # Build Chatterbox TTS for Triton Inference Server
 #
-# Architecture:
+# Architecture (Pure PyTorch with torch.compile):
 #   - T3: Triton vLLM backend (text + speaker conditioning → speech tokens)
-#   - S3Gen: PyTorch in Python backend (speech tokens → audio via flow matching)
-#   - VoiceEncoder: PyTorch in Python backend (reference audio → speaker embedding)
-#   - TRTVocoder: Optional TensorRT for conditional_decoder (vocoder acceleration)
+#   - S3Gen: PyTorch with torch.compile (speech tokens → audio)
+#   - VoiceEncoder: PyTorch (reference audio → speaker embedding)
 #
 # Usage:
 #   ./build_chatterbox.sh              # Build everything
-#   ./build_chatterbox.sh --no-trt     # Skip TensorRT vocoder build
 #   ./build_chatterbox.sh cleanup      # Clean up
 #
 # Container: nvcr.io/nvidia/tritonserver:24.12-vllm-python-py3
@@ -26,9 +24,8 @@ source "${SCRIPT_DIR}/common.sh"
 # Configuration
 # =============================================================================
 
-# HuggingFace repos
+# HuggingFace repo (weights only)
 HF_REPO_MAIN="${HF_REPO_MAIN:-ResembleAI/chatterbox}"
-HF_REPO_ONNX="${HF_REPO_ONNX:-ResembleAI/chatterbox-turbo-ONNX}"
 
 # Paths
 readonly DEPLOY_DIR="$(get_deploy_dir)"
@@ -41,10 +38,6 @@ readonly T3_MODEL_DIR="${DEPLOY_DIR}/model_repository/llm/t3"
 # Chatterbox Python backend
 readonly CHATTERBOX_DIR="${DEPLOY_DIR}/model_repository/tts/chatterbox"
 readonly ASSETS_DIR="${DEPLOY_DIR}/model_repository/tts/chatterbox_assets"
-
-# TRT vocoder (optional)
-readonly TRT_ENGINE_DIR="${CHATTERBOX_DIR}/1/engines"
-BUILD_TRT="${BUILD_TRT:-true}"
 
 # =============================================================================
 # Cleanup Handler
@@ -59,14 +52,7 @@ if [[ "${1:-}" == "cleanup" || "${1:-}" == "clean" ]]; then
             rm -rf "$WORK_DIR"
             rm -rf "$T3_WEIGHTS_DIR"
             rm -rf "$ASSETS_DIR"
-            rm -rf "$TRT_ENGINE_DIR"
             log_info "Cleanup complete"
-            ;;
-        --trt|-t)
-            log_info "Removing TRT engines..."
-            rm -rf "$TRT_ENGINE_DIR"
-            rm -rf "${WORK_DIR}/onnx"
-            log_info "TRT engines removed"
             ;;
         --weights|-w)
             log_info "Removing downloaded weights..."
@@ -80,7 +66,6 @@ if [[ "${1:-}" == "cleanup" || "${1:-}" == "clean" ]]; then
             log_info "Cleanup complete"
             echo ""
             echo "Other cleanup options:"
-            echo "  $0 cleanup --trt      Remove TRT engines"
             echo "  $0 cleanup --weights  Remove downloaded weights"
             echo "  $0 cleanup --all      Remove everything"
             ;;
@@ -88,19 +73,13 @@ if [[ "${1:-}" == "cleanup" || "${1:-}" == "clean" ]]; then
     exit 0
 fi
 
-# Parse arguments
-if [[ "${1:-}" == "--no-trt" ]]; then
-    BUILD_TRT="false"
-    shift
-fi
-
 echo "=============================================="
-echo "Building Chatterbox TTS"
+echo "Building Chatterbox TTS (Pure PyTorch)"
 echo "=============================================="
 echo ""
 echo "T3 vLLM model:  ${T3_WEIGHTS_DIR}"
 echo "Assets:         ${ASSETS_DIR}"
-echo "TRT vocoder:    ${BUILD_TRT}"
+echo "Backend:        PyTorch + torch.compile()"
 echo ""
 
 mkdir -p "$WORK_DIR"
@@ -292,196 +271,7 @@ download_assets() {
 }
 
 # =============================================================================
-# Stage 3: Build TensorRT Vocoder (Optional)
-# =============================================================================
-build_trt_vocoder() {
-    if [[ "$BUILD_TRT" != "true" ]]; then
-        log_info "Skipping TRT vocoder build (--no-trt)"
-        return 0
-    fi
-
-    log_step "Building TensorRT vocoder..."
-
-    local onnx_dir="${WORK_DIR}/onnx"
-    mkdir -p "$onnx_dir"
-    mkdir -p "$TRT_ENGINE_DIR"
-
-    # Check if engine already exists
-    if [[ -f "${TRT_ENGINE_DIR}/conditional_decoder.engine" ]]; then
-        log_info "TRT vocoder engine already exists"
-        return 0
-    fi
-
-    # Download ONNX model for conditional_decoder only
-    local onnx_file="conditional_decoder_fp16.onnx"
-    local onnx_decomposed="conditional_decoder_decomposed.onnx"
-
-    if [[ ! -f "${onnx_dir}/${onnx_file}" ]] || ! is_real_file "${onnx_dir}/${onnx_file}" 1000; then
-        log_info "Downloading ONNX vocoder model..."
-
-        # Clone ONNX repo
-        hf_clone "$HF_REPO_ONNX" "${WORK_DIR}/onnx_repo" || {
-            log_error "Failed to clone ONNX repo"
-            return 1
-        }
-
-        # Copy only the vocoder ONNX
-        cp "${WORK_DIR}/onnx_repo/onnx/${onnx_file}"* "$onnx_dir/" 2>/dev/null || {
-            log_error "conditional_decoder ONNX not found"
-            return 1
-        }
-    fi
-
-    # Verify ONNX is real (not LFS pointer)
-    if ! is_real_file "${onnx_dir}/${onnx_file}" 100000; then
-        log_error "ONNX file is LFS pointer, not actual model"
-        return 1
-    fi
-
-    # Decompose Microsoft custom ops to standard ONNX ops
-    # The original ONNX uses com.microsoft::MultiHeadAttention which TRT doesn't support
-    # This converts it to standard MatMul + Softmax ops while preserving weights
-
-    # Always re-decompose to pick up script changes
-    rm -f "${onnx_dir}/${onnx_decomposed}"
-
-    log_info "Decomposing custom attention ops to standard ONNX..."
-
-    # Ensure ONNX tools are installed (pin compatible versions)
-    # onnx-graphsurgeon requires specific onnx version for bfloat16 support
-    log_info "Installing ONNX dependencies..."
-    pip3.12 uninstall -y onnx onnx-graphsurgeon 2>/dev/null || true
-    pip3.12 install "onnx==1.15.0" "onnx-graphsurgeon==0.5.2" protobuf numpy 2>&1 | grep -v "already satisfied" || true
-
-    python3.12 "${SCRIPT_DIR}/decompose_onnx.py" \
-        --input "${onnx_dir}/${onnx_file}" \
-        --output "${onnx_dir}/${onnx_decomposed}" || {
-        log_warn "ONNX decomposition failed - trying direct TRT build..."
-        onnx_decomposed="$onnx_file"
-    }
-
-    # Build TensorRT engine
-    # Shapes: progressive chunks 4,8,16,32,32 tokens -> min=4, opt=32, max=64
-    log_info "Building TensorRT engine (this may take a few minutes)..."
-    build_trt_engine \
-        "${onnx_dir}/${onnx_decomposed}" \
-        "${TRT_ENGINE_DIR}/conditional_decoder.engine" \
-        "--fp16" \
-        "--minShapes=speech_tokens:1x4" \
-        "--optShapes=speech_tokens:1x32" \
-        "--maxShapes=speech_tokens:1x64" || {
-        log_warn "TRT build failed - will use PyTorch S3Gen vocoder"
-        return 0
-    }
-
-    log_info "TRT vocoder built: ${TRT_ENGINE_DIR}/conditional_decoder.engine"
-}
-
-# =============================================================================
-# Stage 3b: Build TensorRT Flow Decoder (Optional - Unrolled Diffusion)
-# =============================================================================
-build_trt_flow_decoder() {
-    # Check if enabled in config
-    local flow_trt_enabled
-    flow_trt_enabled=$(cfg_get 's3gen.flow_decoder_trt' 'false')
-
-    if [[ "$flow_trt_enabled" != "true" ]] && [[ "${BUILD_FLOW_TRT:-}" != "true" ]]; then
-        log_info "Flow decoder TRT disabled (set s3gen.flow_decoder_trt: true in config.yaml)"
-        return 0
-    fi
-
-    log_step "Building TensorRT flow decoder (unrolled diffusion)..."
-
-    # Get diffusion steps from config
-    local num_steps
-    num_steps=$(cfg_get 's3gen.diffusion_steps_trt' '4')
-    log_info "Diffusion steps: ${num_steps}"
-
-    local onnx_dir="${WORK_DIR}/onnx"
-    local onnx_file="flow_decoder_${num_steps}steps_fp16.onnx"
-    local engine_file="${TRT_ENGINE_DIR}/flow_decoder_${num_steps}steps.engine"
-
-    mkdir -p "$onnx_dir"
-    mkdir -p "$TRT_ENGINE_DIR"
-
-    # Check if engine already exists
-    if [[ -f "$engine_file" ]]; then
-        log_info "Flow decoder TRT engine already exists: $engine_file"
-        return 0
-    fi
-
-    # Check if ONNX already exists
-    if [[ ! -f "${onnx_dir}/${onnx_file}" ]]; then
-        log_info "Exporting unrolled flow decoder to ONNX..."
-
-        # Use python3.12
-        local python_cmd="python3.12"
-
-        # Check if we have the assets
-        if [[ ! -f "${ASSETS_DIR}/s3gen.safetensors" ]]; then
-            log_error "S3Gen weights not found - cannot export flow decoder"
-            log_error "Run download_assets first"
-            return 1
-        fi
-
-        # Export ONNX with unrolled diffusion steps
-        $python_cmd "${SCRIPT_DIR}/export_flow_decoder.py" \
-            --assets-dir "${ASSETS_DIR}" \
-            --output-dir "${onnx_dir}" \
-            --steps "${num_steps}" \
-            --fp16 || {
-            log_warn "Flow decoder ONNX export failed"
-            log_warn "This is expected if S3Gen model class is not available"
-            log_warn "Using PyTorch flow decoder instead"
-            return 0
-        }
-    fi
-
-    # Verify ONNX exists
-    if [[ ! -f "${onnx_dir}/${onnx_file}" ]]; then
-        log_warn "Flow decoder ONNX not found - skipping TRT build"
-        return 0
-    fi
-
-    # Get shapes from config (comma-separated for multiple inputs)
-    local min_shapes opt_shapes max_shapes
-    min_shapes=$(cfg_get 's3gen.flow_decoder_shapes.min' 'latents:1x128x16,speaker_embedding:1x256,speech_token_embedding:1x4x1024')
-    opt_shapes=$(cfg_get 's3gen.flow_decoder_shapes.opt' 'latents:1x128x64,speaker_embedding:1x256,speech_token_embedding:1x32x1024')
-    max_shapes=$(cfg_get 's3gen.flow_decoder_shapes.max' 'latents:1x128x256,speaker_embedding:1x256,speech_token_embedding:1x128x1024')
-
-    # Build TensorRT engine
-    log_info "Building TensorRT engine for flow decoder..."
-    log_info "  Min shapes: ${min_shapes}"
-    log_info "  Opt shapes: ${opt_shapes}"
-    log_info "  Max shapes: ${max_shapes}"
-
-    build_trt_engine \
-        "${onnx_dir}/${onnx_file}" \
-        "${engine_file}" \
-        "--fp16" \
-        "--minShapes=${min_shapes}" \
-        "--optShapes=${opt_shapes}" \
-        "--maxShapes=${max_shapes}" || {
-        log_warn "Flow decoder TRT build failed - will use PyTorch"
-        return 0
-    }
-
-    # Save metadata for Python backend
-    cat > "${TRT_ENGINE_DIR}/flow_decoder_config.json" << EOF
-{
-    "engine_file": "flow_decoder_${num_steps}steps.engine",
-    "num_steps": ${num_steps},
-    "precision": "fp16",
-    "input_names": ["latents", "speaker_embedding", "speech_token_embedding"],
-    "output_names": ["mel_spectrogram"]
-}
-EOF
-
-    log_info "Flow decoder TRT built: ${engine_file}"
-}
-
-# =============================================================================
-# Stage 4: Compile Voice Conditioning
+# Stage 3: Compile Voice Conditioning
 # =============================================================================
 compile_voices() {
     log_step "Compiling voice conditioning..."
@@ -537,7 +327,7 @@ compile_voices() {
 }
 
 # =============================================================================
-# Stage 5: Create Triton Configs
+# Stage 4: Create Triton Configs
 # =============================================================================
 create_triton_configs() {
     log_step "Creating Triton model configs..."
@@ -680,15 +470,8 @@ show_summary() {
     echo "  Location: ${ASSETS_DIR}"
     ls -lh "${ASSETS_DIR}"/*.safetensors 2>/dev/null | head -3
     echo ""
-    if [[ -d "${TRT_ENGINE_DIR}" ]] && ls "${TRT_ENGINE_DIR}"/*.engine &>/dev/null; then
-        echo "TRT Engines:"
-        ls -lh "${TRT_ENGINE_DIR}"/*.engine
-        if [[ -f "${TRT_ENGINE_DIR}/flow_decoder_config.json" ]]; then
-            echo "  Flow decoder config:"
-            cat "${TRT_ENGINE_DIR}/flow_decoder_config.json"
-        fi
-        echo ""
-    fi
+    echo "Backend: PyTorch + torch.compile()"
+    echo ""
     echo "Voices:"
     if [[ -f "${T3_WEIGHTS_DIR}/voices/voices.json" ]]; then
         cat "${T3_WEIGHTS_DIR}/voices/voices.json"
@@ -708,8 +491,6 @@ show_summary() {
 main() {
     download_t3
     download_assets
-    build_trt_vocoder
-    build_trt_flow_decoder
     compile_voices
     create_triton_configs
     show_summary
