@@ -52,14 +52,12 @@ services:
       --model-repository=/models/llm
       --model-repository=/models/tts
       --model-control-mode=explicit
-      --model-load-thread-count=1
-      --load-model=qwen3_8b
-      --load-model=parakeet_tdt
-      --load-model=cosyvoice2
-      --load-model=audio_tokenizer
-      --load-model=speaker_embedding
-      --load-model=tensorrt_llm
-      --load-model=token2wav
+      --model-load-thread-count=4
+      --load-model=chatterbox
+      --load-model=chatterbox_decoder
+      --load-model=chatterbox_embed
+      --load-model=chatterbox_encoder
+      --load-model=chatterbox_lm
       --disable-auto-complete-config
       --http-port=8000
       --grpc-port=8001
