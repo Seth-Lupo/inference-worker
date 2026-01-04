@@ -783,7 +783,8 @@ def validate_audio_chunk(data: bytes) -> bool:
 
 - [NVIDIA Triton Inference Server](https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/index.html)
 - [Parakeet TDT 0.6B V2](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v2)
-- [CosyVoice 2](https://github.com/FunAudioLLM/CosyVoice)
+- [Chatterbox TTS](https://huggingface.co/ResembleAI/chatterbox)
 - [Silero VAD](https://github.com/snakers4/silero-vad)
-- [Qwen3 TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM/blob/main/examples/models/core/qwen/README.md)
+- [Qwen3](https://huggingface.co/Qwen/Qwen3-4B-Instruct-AWQ)
+- [vLLM](https://docs.vllm.ai/)
 - [Sub-Second Voice Agent Latency Guide](https://dev.to/tigranbs/sub-second-voice-agent-latency-a-practical-architecture-guide-4cg1)
