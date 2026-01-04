@@ -22,7 +22,7 @@ services:
   # Serves ALL models: LLMs via vLLM, TTS/ASR via Python/TensorRT
   # =============================================================================
   triton:
-    image: nvcr.io/nvidia/tritonserver:25.08-vllm-python-py3
+    image: nvcr.io/nvidia/tritonserver:25.12-vllm-python-py3
     container_name: voice-agent-triton
     restart: unless-stopped
     build:
@@ -155,7 +155,7 @@ services:
   # Usage: docker compose --profile build run model-builder
   # =============================================================================
   model-builder:
-    image: nvcr.io/nvidia/tensorrt:24.08-py3
+    image: nvcr.io/nvidia/tensorrt:24.09-py3
     container_name: voice-agent-model-builder
     profiles: ["build"]
 

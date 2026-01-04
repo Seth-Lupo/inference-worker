@@ -13,7 +13,7 @@
 # - Using NGC 24.12 series for all containers
 images:
   # TensorRT container for ONNX->TRT builds (trtexec)
-  tensorrt: "nvcr.io/nvidia/tensorrt:24.08-py3"
+  tensorrt: "nvcr.io/nvidia/tensorrt:24.09-py3"
 
   # Triton container for serving (must match TRT version)
   triton: "nvcr.io/nvidia/tritonserver:25.08-py3"

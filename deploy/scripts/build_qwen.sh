@@ -12,7 +12,7 @@
 # The model is downloaded to the HuggingFace cache and will be loaded by
 # vLLM at runtime. Pre-downloading avoids cold-start delays.
 #
-# Container: nvcr.io/nvidia/tritonserver:25.08-vllm-python-py3
+# Container: nvcr.io/nvidia/tritonserver:25.12-vllm-python-py3
 # =============================================================================
 
 # Load shared utilities
