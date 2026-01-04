@@ -459,3 +459,16 @@ class T3ForCausalLM(nn.Module):
                     loaded.add(name)
 
         return loaded
+
+
+# Register T3 with vLLM's model registry for custom model support
+try:
+    from vllm.model_executor.models.registry import ModelRegistry
+    ModelRegistry.register_model("T3ForCausalLM", T3ForCausalLM)
+except (ImportError, AttributeError):
+    # Fallback for different vLLM versions
+    try:
+        from vllm.model_executor.models import _MODELS
+        _MODELS["T3ForCausalLM"] = T3ForCausalLM
+    except ImportError:
+        pass
