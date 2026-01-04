@@ -1,11 +1,11 @@
 name: "chatterbox_encoder"
-platform: "tensorrt_plan"
+platform: "onnxruntime_onnx"
 max_batch_size: 8
 
 input [
   {
     name: "input_features"
-    data_type: TYPE_FP16
+    data_type: TYPE_FP32
     dims: [-1, 80]
   }
 ]
@@ -13,7 +13,7 @@ input [
 output [
   {
     name: "conditioning"
-    data_type: TYPE_FP16
+    data_type: TYPE_FP32
     dims: [256]
   }
 ]
@@ -24,6 +24,15 @@ instance_group [
     kind: KIND_GPU
   }
 ]
+
+# Use CUDA execution provider for GPU acceleration
+optimization {
+  execution_accelerators {
+    gpu_execution_accelerator : [
+      { name : "cuda" }
+    ]
+  }
+}
 
 dynamic_batching {
   preferred_batch_size: [1, 2, 4]

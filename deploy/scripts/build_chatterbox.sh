@@ -291,23 +291,10 @@ stage_build_engines() {
         "--optShapes=${EMBED_TOKENS_OPT}" \
         "--maxShapes=${EMBED_TOKENS_MAX}"
 
-    # Build speech_encoder engine
-    # Note: Speech encoder has STFT which requires FP32 input, so we use FP32 model
-    log_info "Building speech_encoder engine (FP32 - STFT requires it)..."
-    local speech_enc_onnx="speech_encoder.onnx"  # Use FP32 version
-    if [[ ! -f "${onnx_dir}/${speech_enc_onnx}" ]]; then
-        # Download FP32 version if not present
-        log_info "Downloading FP32 speech_encoder..."
-        (cd "${WORK_DIR}/chatterbox-turbo-ONNX" && git lfs pull --include="onnx/speech_encoder.onnx,onnx/speech_encoder.onnx_data")
-        cp "${WORK_DIR}/chatterbox-turbo-ONNX/onnx/speech_encoder.onnx"* "${onnx_dir}/" 2>/dev/null || true
-    fi
-    build_trt_engine \
-        "${onnx_dir}/${speech_enc_onnx}" \
-        "${engine_dir}/speech_encoder.engine" \
-        --fp32 \
-        "--minShapes=${SPEECH_ENC_MIN}" \
-        "--optShapes=${SPEECH_ENC_OPT}" \
-        "--maxShapes=${SPEECH_ENC_MAX}"
+    # Speech encoder: Skip TensorRT - uses custom ONNX ops (STFT) not supported by TRT
+    # Will use ONNX Runtime with CUDA EP instead (configured in Triton model)
+    log_info "Skipping speech_encoder TensorRT build (uses unsupported STFT ops)"
+    log_info "Speech encoder will use ONNX Runtime with CUDA EP at runtime"
 
     # Build conditional_decoder engine (single-step, easier)
     log_info "Building conditional_decoder engine..."
@@ -356,9 +343,15 @@ stage_create_model_repo() {
     # Copy engines
     log_info "Copying TensorRT engines..."
     cp "${engine_dir}/language_model.engine" "${MODEL_REPO}/chatterbox_lm/1/" 2>/dev/null || true
-    cp "${engine_dir}/speech_encoder.engine" "${MODEL_REPO}/chatterbox_encoder/1/" 2>/dev/null || true
     cp "${engine_dir}/conditional_decoder.engine" "${MODEL_REPO}/chatterbox_decoder/1/" 2>/dev/null || true
     cp "${engine_dir}/embed_tokens.engine" "${MODEL_REPO}/chatterbox_embed/1/" 2>/dev/null || true
+
+    # Copy speech encoder ONNX (uses ONNX Runtime, not TensorRT)
+    log_info "Copying speech_encoder ONNX model..."
+    cp "${onnx_dir}/speech_encoder.onnx" "${MODEL_REPO}/chatterbox_encoder/1/model.onnx" 2>/dev/null || \
+    cp "${onnx_dir}/speech_encoder_fp16.onnx" "${MODEL_REPO}/chatterbox_encoder/1/model.onnx" 2>/dev/null || true
+    cp "${onnx_dir}/speech_encoder.onnx_data" "${MODEL_REPO}/chatterbox_encoder/1/model.onnx_data" 2>/dev/null || \
+    cp "${onnx_dir}/speech_encoder_fp16.onnx_data" "${MODEL_REPO}/chatterbox_encoder/1/model.onnx_data" 2>/dev/null || true
 
     # Copy config files
     log_info "Copying configuration files..."
