@@ -43,3 +43,8 @@ RUN pip install --no-cache-dir -c /tmp/constraints.txt \
         conformer \
         s3tokenizer \
         huggingface_hub
+
+# Install TensorRT Python bindings for TRTVocoder
+# Check if tensorrt is already available, install if not
+RUN python3 -c "import tensorrt" 2>/dev/null || \
+    pip install --no-cache-dir tensorrt
