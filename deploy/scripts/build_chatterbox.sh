@@ -345,13 +345,12 @@ build_trt_vocoder() {
         log_info "Decomposing custom attention ops to standard ONNX..."
 
         # Ensure ONNX tools are installed
-        if ! python3 -c "import onnx" 2>/dev/null; then
+        if ! python3.12 -c "import onnx" 2>/dev/null; then
             log_info "Installing ONNX dependencies..."
-            pip install --quiet onnx onnx-graphsurgeon onnxruntime-tools 2>/dev/null || \
-                pip3 install --quiet onnx onnx-graphsurgeon onnxruntime-tools 2>/dev/null || true
+            pip3.12 install --quiet onnx onnx-graphsurgeon onnxruntime-tools || true
         fi
 
-        python3 "${SCRIPT_DIR}/decompose_onnx.py" \
+        python3.12 "${SCRIPT_DIR}/decompose_onnx.py" \
             --input "${onnx_dir}/${onnx_file}" \
             --output "${onnx_dir}/${onnx_decomposed}" || {
             log_warn "ONNX decomposition failed - trying direct TRT build..."
@@ -413,9 +412,8 @@ build_trt_flow_decoder() {
     if [[ ! -f "${onnx_dir}/${onnx_file}" ]]; then
         log_info "Exporting unrolled flow decoder to ONNX..."
 
-        # Find Python with torch
-        local python_cmd="python3"
-        [[ -x "${CONDA_PREFIX:-/opt/conda}/bin/python" ]] && python_cmd="${CONDA_PREFIX:-/opt/conda}/bin/python"
+        # Use python3.12
+        local python_cmd="python3.12"
 
         # Check if we have the assets
         if [[ ! -f "${ASSETS_DIR}/s3gen.safetensors" ]]; then
@@ -497,9 +495,8 @@ compile_voices() {
         return 0
     fi
 
-    # Find Python
-    local python_cmd="python3"
-    [[ -x "${CONDA_PREFIX:-/opt/conda}/bin/python" ]] && python_cmd="${CONDA_PREFIX:-/opt/conda}/bin/python"
+    # Use python3.12
+    local python_cmd="python3.12"
 
     # Check for voice files
     local has_voices=false
