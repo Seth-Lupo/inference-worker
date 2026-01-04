@@ -150,8 +150,6 @@ class TritonPythonModel:
             "runtime_top_p": np.array([[0.95]], dtype=np.float32),
             "runtime_top_k": np.array([[50]], dtype=np.int32),
             "temperature": np.array([[0.8]], dtype=np.float32),
-            "repetition_penalty": np.array([[1.1]], dtype=np.float32),
-            "random_seed": np.array([[42]], dtype=np.uint64),
             "input_ids": input_ids,
             "input_lengths": np.array([[input_ids.shape[1]]], dtype=np.int32),
         }

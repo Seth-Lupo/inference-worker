@@ -73,20 +73,6 @@ input [
     dims: [1]
     reshape: { shape: [] }
     optional: true
-  },
-  {
-    name: "random_seed"
-    data_type: TYPE_UINT64
-    dims: [1]
-    reshape: { shape: [] }
-    optional: true
-  },
-  {
-    name: "repetition_penalty"
-    data_type: TYPE_FP32
-    dims: [1]
-    reshape: { shape: [] }
-    optional: true
   }
 ]
 output [
