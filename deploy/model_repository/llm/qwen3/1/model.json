@@ -3,7 +3,7 @@
     "quantization": "gptq",
     "dtype": "float16",
     "tensor_parallel_size": 1,
-    "gpu_memory_utilization": 0.15,
+    "gpu_memory_utilization": 0.45,
     "max_model_len": 4096,
     "enable_prefix_caching": true,
     "disable_log_stats": false

@@ -1,11 +1,10 @@
 {
     "model": "/models/t3_weights",
-    "tokenizer": "/models/t3_weights",
-    "tokenizer_mode": "auto",
+    "skip_tokenizer_init": true,
     "trust_remote_code": true,
     "dtype": "bfloat16",
     "tensor_parallel_size": 1,
-    "gpu_memory_utilization": 0.08,
+    "gpu_memory_utilization": 0.20,
     "max_model_len": 2048,
     "enforce_eager": true,
     "disable_log_stats": false,
