@@ -135,73 +135,89 @@ mkdir -p "$WORK_DIR"
 stage_download_models() {
     log_step "Stage 0: Downloading ONNX models from HuggingFace..."
 
+    local clone_dir="${WORK_DIR}/chatterbox-turbo-ONNX"
     local onnx_dir="${WORK_DIR}/onnx"
 
     # Check if models already exist
     if [[ -f "${onnx_dir}/${LANGUAGE_MODEL_ONNX}" ]]; then
-        log_info "ONNX models already downloaded"
-        return 0
+        local size
+        size=$(get_file_size "${onnx_dir}/${LANGUAGE_MODEL_ONNX}")
+        if [[ "$size" -gt 1000000 ]]; then
+            log_info "ONNX models already downloaded (language_model: $(numfmt --to=iec "$size" 2>/dev/null || echo "${size}B"))"
+            return 0
+        fi
     fi
 
-    mkdir -p "$onnx_dir"
+    # Ensure git-lfs is installed
+    ensure_git_lfs || return 1
 
-    # Download using huggingface-hub
-    log_info "Downloading from ${HF_REPO}..."
-
-    # Check if huggingface_hub is available
-    if python3 -c "import huggingface_hub" 2>/dev/null; then
-        python3 << EOF
-from huggingface_hub import hf_hub_download, list_repo_files
-import os
-
-repo_id = "${HF_REPO}"
-local_dir = "${onnx_dir}"
-precision = "${PRECISION}"
-
-# Files to download based on precision
-suffix = "_fp16" if precision == "fp16" else ""
-files = [
-    f"onnx/embed_tokens{suffix}.onnx",
-    f"onnx/embed_tokens{suffix}.onnx_data",
-    f"onnx/language_model{suffix}.onnx",
-    f"onnx/language_model{suffix}.onnx_data",
-    f"onnx/speech_encoder{suffix}.onnx",
-    f"onnx/speech_encoder{suffix}.onnx_data",
-    f"onnx/conditional_decoder{suffix}.onnx",
-    f"onnx/conditional_decoder{suffix}.onnx_data",
-]
-
-# Also download config files
-config_files = [
-    "config.json",
-    "tokenizer.json",
-    "tokenizer_config.json",
-]
-
-print(f"Downloading {len(files)} ONNX files...")
-for f in files:
-    print(f"  {f}")
-    hf_hub_download(repo_id=repo_id, filename=f, local_dir=local_dir)
-
-print(f"Downloading config files...")
-for f in config_files:
-    print(f"  {f}")
-    hf_hub_download(repo_id=repo_id, filename=f, local_dir=local_dir)
-
-print("Download complete!")
-EOF
+    # Clone the repository with LFS
+    if [[ -d "$clone_dir" ]]; then
+        log_info "Repository already cloned, pulling LFS files..."
+        (cd "$clone_dir" && git lfs pull)
     else
-        log_error "huggingface_hub not installed. Install with: pip install huggingface_hub"
+        log_info "Cloning ${HF_REPO} with git-lfs..."
+
+        local git_url="https://huggingface.co/${HF_REPO}"
+        if [[ -n "${HF_TOKEN:-}" ]]; then
+            git_url="https://USER:${HF_TOKEN}@huggingface.co/${HF_REPO}"
+        fi
+
+        # Clone with LFS enabled
+        GIT_LFS_SKIP_SMUDGE=0 git clone --depth 1 "$git_url" "$clone_dir" || {
+            log_error "Failed to clone repository"
+            return 1
+        }
+
+        # Ensure LFS files are pulled
+        log_info "Pulling LFS files..."
+        (cd "$clone_dir" && git lfs pull) || {
+            log_error "Failed to pull LFS files"
+            return 1
+        }
+    fi
+
+    # Verify LFS files were downloaded (not just pointers)
+    local lm_file="${clone_dir}/onnx/${LANGUAGE_MODEL_ONNX}"
+    if [[ -f "$lm_file" ]]; then
+        local size
+        size=$(get_file_size "$lm_file")
+        if [[ "$size" -lt 1000000 ]]; then
+            log_error "LFS files appear to be pointers. Retrying LFS pull..."
+            (cd "$clone_dir" && git lfs pull --include="onnx/*")
+            size=$(get_file_size "$lm_file")
+            if [[ "$size" -lt 1000000 ]]; then
+                log_error "Failed to download LFS files. Check git-lfs installation."
+                return 1
+            fi
+        fi
+        log_info "Language model size: $(numfmt --to=iec "$size" 2>/dev/null || echo "${size}B")"
+    else
+        log_error "Expected file not found: $lm_file"
         return 1
     fi
 
-    # Move ONNX files to root of onnx_dir for easier access
-    if [[ -d "${onnx_dir}/onnx" ]]; then
-        mv "${onnx_dir}/onnx"/* "${onnx_dir}/"
-        rmdir "${onnx_dir}/onnx"
-    fi
+    # Copy files to onnx_dir
+    mkdir -p "$onnx_dir"
 
-    log_info "ONNX models downloaded to ${onnx_dir}"
+    log_info "Copying ONNX models..."
+    cp "${clone_dir}/onnx/${EMBED_TOKENS_ONNX}"* "$onnx_dir/" 2>/dev/null || true
+    cp "${clone_dir}/onnx/${LANGUAGE_MODEL_ONNX}"* "$onnx_dir/" 2>/dev/null || true
+    cp "${clone_dir}/onnx/${SPEECH_ENCODER_ONNX}"* "$onnx_dir/" 2>/dev/null || true
+    cp "${clone_dir}/onnx/${CONDITIONAL_DECODER_ONNX}"* "$onnx_dir/" 2>/dev/null || true
+
+    log_info "Copying config files..."
+    cp "${clone_dir}/config.json" "$onnx_dir/" 2>/dev/null || true
+    cp "${clone_dir}/tokenizer.json" "$onnx_dir/" 2>/dev/null || true
+    cp "${clone_dir}/tokenizer_config.json" "$onnx_dir/" 2>/dev/null || true
+
+    # List downloaded files
+    log_info "Downloaded files:"
+    ls -lh "$onnx_dir"/*.onnx 2>/dev/null | while read -r line; do
+        log_info "  $line"
+    done
+
+    log_info "ONNX models ready at ${onnx_dir}"
 }
 
 # =============================================================================
