@@ -35,6 +35,10 @@ RUN pip install --no-cache-dir \
         soundfile \
         scipy
 
+# Install torchvision (required by diffusers -> transformers CLIP)
+# Must match the torch version in base image
+RUN pip install --no-cache-dir torchvision
+
 # Install S3Gen/Chatterbox dependencies (not in base image)
 # diffusers 0.27+ avoids cached_download deprecation in new huggingface_hub
 # DIFFUSERS_NO_XFORMERS=1 env var prevents xformers import issues
