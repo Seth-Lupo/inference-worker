@@ -18,7 +18,9 @@ import numpy as np
 import triton_python_backend_utils as pb_utils
 
 MODEL_DIR = Path(__file__).parent
-sys.path.insert(0, str(MODEL_DIR))
+# chatterbox_tts module is in the main chatterbox model directory
+CHATTERBOX_DIR = MODEL_DIR.parent.parent / "chatterbox" / "1"
+sys.path.insert(0, str(CHATTERBOX_DIR))
 
 
 class TritonPythonModel:

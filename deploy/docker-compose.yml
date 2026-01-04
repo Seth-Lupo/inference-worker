@@ -87,6 +87,8 @@ services:
       --load-model=qwen3
       --load-model=t3
       --load-model=chatterbox
+      --load-model=chatterbox_voice_encoder
+      --load-model=chatterbox_s3gen
       --load-model=parakeet_encoder
       --load-model=parakeet_decoder
       --load-model=parakeet_tdt

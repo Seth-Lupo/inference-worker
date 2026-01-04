@@ -1,8 +1,8 @@
-# Chatterbox S3Gen - PyTorch Backend with torch.compile
-# Converts speech tokens to audio waveform using flow decoder + HiFT vocoder
+# Chatterbox S3Gen - Python Backend with torch.compile
+# Flow decoder + HiFT vocoder for speech token to audio conversion
 #
-# Input: Speech tokens + S3Gen conditioning
-# Output: Audio waveform (24kHz float32)
+# Called by chatterbox BLS orchestrator after T3 generates tokens.
+# Uses torch.compile() for optimal GPU performance.
 
 name: "chatterbox_s3gen"
 backend: "python"
@@ -10,23 +10,23 @@ max_batch_size: 1
 
 input [
   {
-    # Speech token IDs from T3
     name: "speech_tokens"
     data_type: TYPE_INT64
     dims: [ -1 ]
+    description: "Speech token IDs from T3"
   },
   {
-    # S3Gen conditioning (serialized torch dict)
     name: "s3gen_conditioning"
     data_type: TYPE_UINT8
     dims: [ -1 ]
+    description: "Serialized S3Gen ref_dict from voice_encoder"
   },
   {
-    # Number of diffusion steps (lower = faster, higher = better quality)
     name: "n_timesteps"
     data_type: TYPE_INT32
     dims: [ 1 ]
     optional: true
+    description: "Diffusion timesteps (default: 7)"
   }
 ]
 
@@ -35,11 +35,13 @@ output [
     name: "audio"
     data_type: TYPE_FP32
     dims: [ -1 ]
+    description: "Audio waveform samples"
   },
   {
     name: "sample_rate"
     data_type: TYPE_INT32
     dims: [ 1 ]
+    description: "Output sample rate (24000)"
   }
 ]
 

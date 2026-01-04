@@ -1,6 +1,13 @@
-# Chatterbox Turbo TTS - Python Backend with vLLM T3
-# Uses vLLM internally for speech token generation
-# Streaming audio output via decoupled mode
+# Chatterbox TTS - BLS Orchestrator
+#
+# Architecture:
+#   chatterbox (this model - BLS orchestrator)
+#     ├── chatterbox_voice_encoder (Python) - reference audio -> S3Gen conditioning
+#     ├── t3 (vLLM via gRPC) - text + conditioning -> speech tokens
+#     └── chatterbox_s3gen (Python + torch.compile) - tokens -> audio
+#
+# This orchestrator calls sub-models via BLS (Business Logic Scripting).
+# T3 is called via gRPC since vLLM backends don't support BLS internal calls.
 
 name: "chatterbox"
 backend: "python"
@@ -23,12 +30,6 @@ input [
     data_type: TYPE_FP32
     dims: [-1]
     optional: true
-  },
-  {
-    name: "exaggeration"
-    data_type: TYPE_FP32
-    dims: [1]
-    optional: true
   }
 ]
 
@@ -45,7 +46,7 @@ model_transaction_policy {
   decoupled: True
 }
 
-# Single instance - vLLM manages its own GPU resources
+# Single instance - orchestrates calls to sub-models
 instance_group [
   {
     count: 1
@@ -54,22 +55,6 @@ instance_group [
 ]
 
 parameters {
-  key: "model_dir"
-  value: { string_value: "/models/tts/chatterbox_assets" }
-}
-
-parameters {
   key: "sample_rate"
   value: { string_value: "24000" }
-}
-
-# vLLM T3 configuration
-parameters {
-  key: "t3_max_model_len"
-  value: { string_value: "1000" }
-}
-
-parameters {
-  key: "t3_gpu_memory_utilization"
-  value: { string_value: "0.3" }
 }
