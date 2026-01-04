@@ -5,7 +5,7 @@
 #
 # Base image already includes: torch, transformers, huggingface_hub, tokenizers,
 # safetensors, numpy (via vLLM). We only add what's missing.
-FROM nvcr.io/nvidia/tritonserver:25.12-vllm-python-py3
+FROM nvcr.io/nvidia/tritonserver:25.08-vllm-python-py3
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
