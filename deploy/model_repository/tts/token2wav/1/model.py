@@ -193,12 +193,26 @@ class CosyVoice2Model:
         self.flow.encoder = flow_encoder
 
     def load(self, flow_model, hift_model):
-        self.flow.load_state_dict(torch.load(flow_model, map_location=self.device), strict=True)
+        flow_state = torch.load(flow_model, map_location=self.device)
+        self.flow.load_state_dict(flow_state, strict=True)
         self.flow.to(self.device).eval()
+
+        # Validate flow weights
+        nan_count = sum(1 for p in self.flow.parameters() if torch.isnan(p).any())
+        inf_count = sum(1 for p in self.flow.parameters() if torch.isinf(p).any())
+        total_params = sum(1 for _ in self.flow.parameters())
+        logging.info(f"Flow model loaded: {total_params} params, {nan_count} with NaN, {inf_count} with Inf")
+
         # in case hift_model is a hifigan model
         hift_state_dict = {k.replace('generator.', ''): v for k, v in torch.load(hift_model, map_location=self.device).items()}
         self.hift.load_state_dict(hift_state_dict, strict=True)
         self.hift.to(self.device).eval()
+
+        # Validate hift weights
+        nan_count = sum(1 for p in self.hift.parameters() if torch.isnan(p).any())
+        inf_count = sum(1 for p in self.hift.parameters() if torch.isinf(p).any())
+        total_params = sum(1 for _ in self.hift.parameters())
+        logging.info(f"HiFT model loaded: {total_params} params, {nan_count} with NaN, {inf_count} with Inf")
 
     def load_trt(self, flow_decoder_estimator_engine, flow_decoder_onnx_model, trt_concurrent, fp16):
         assert torch.cuda.is_available(), 'tensorrt only supports gpu!'
@@ -229,6 +243,9 @@ class CosyVoice2Model:
                                              embedding=embedding.to(self.device),
                                              streaming=stream,
                                              finalize=finalize)
+        has_nan = torch.isnan(tts_mel).any().item()
+        has_inf = torch.isinf(tts_mel).any().item()
+        logging.info(f"token2wav flow output: mel shape={tts_mel.shape}, min={tts_mel.min().item():.4f}, max={tts_mel.max().item():.4f}, has_nan={has_nan}, has_inf={has_inf}")
         tts_mel = tts_mel[:, :, token_offset * self.flow.token_mel_ratio:]
         # append hift cache
         if self.hift_cache_dict[uuid] is not None:
@@ -277,8 +294,12 @@ class TritonPythonModel:
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         logger.info(f"Initializing vocoder from {model_dir} on {self.device}")
 
+        # Allow disabling TensorRT for debugging (set use_trt: "false" in config.pbtxt)
+        use_trt = model_params.get("use_trt", "true").lower() == "true"
+        logger.info(f"TensorRT enabled: {use_trt}")
+
         self.token2wav_model = CosyVoice2(
-            model_dir, load_jit=False, load_trt=True, fp16=True, device=self.device
+            model_dir, load_jit=False, load_trt=use_trt, fp16=True, device=self.device
         )
 
         spk_info_path = os.path.join(model_dir, "spk2info.pt")
@@ -286,6 +307,15 @@ class TritonPythonModel:
             raise ValueError(f"spk2info.pt not found in {model_dir}")
         spk_info = torch.load(spk_info_path, map_location="cpu", weights_only=False)
         self.default_spk_info = spk_info["001"]
+
+        # Debug: Check default speaker info for NaN
+        for key, val in self.default_spk_info.items():
+            if isinstance(val, torch.Tensor):
+                has_nan = torch.isnan(val).any().item()
+                has_inf = torch.isinf(val).any().item()
+                logger.info(f"default_spk_info['{key}']: shape={val.shape}, dtype={val.dtype}, has_nan={has_nan}, has_inf={has_inf}")
+            else:
+                logger.info(f"default_spk_info['{key}']: {type(val)}")
 
         logger.info("Token2Wav initialized successfully")
 
@@ -331,6 +361,13 @@ class TritonPythonModel:
                 else:
                     stream = False
                 request_id = request.request_id()
+
+                # Debug: Check for NaN in inputs
+                logger.info(f"token2wav STREAMING: target_tokens shape={target_speech_tokens.shape}, min={target_speech_tokens.min().item()}, max={target_speech_tokens.max().item()}")
+                logger.info(f"token2wav STREAMING: prompt_tokens shape={prompt_speech_tokens.shape}, has_nan={torch.isnan(prompt_speech_tokens.float()).any().item()}")
+                logger.info(f"token2wav STREAMING: prompt_feat shape={prompt_speech_feat.shape}, has_nan={torch.isnan(prompt_speech_feat).any().item()}, min={prompt_speech_feat.min().item():.4f}, max={prompt_speech_feat.max().item():.4f}")
+                logger.info(f"token2wav STREAMING: embedding shape={prompt_spk_embedding.shape}, has_nan={torch.isnan(prompt_spk_embedding).any().item()}, min={prompt_spk_embedding.min().item():.4f}, max={prompt_spk_embedding.max().item():.4f}")
+                logger.info(f"token2wav STREAMING: offset={token_offset}, finalize={finalize}")
                 audio_hat = self.token2wav_model.model.token2wav(token=target_speech_tokens,
                                                                  prompt_token=prompt_speech_tokens,
                                                                  prompt_feat=prompt_speech_feat,
@@ -339,10 +376,14 @@ class TritonPythonModel:
                                                                  uuid=request_id,
                                                                  stream=stream,
                                                                  finalize=finalize)
+                logger.info(f"token2wav STREAMING result: shape={audio_hat.shape}, min={audio_hat.min().item():.4f}, max={audio_hat.max().item():.4f}")
                 if finalize:
                     self.token2wav_model.model.hift_cache_dict.pop(request_id)
 
             else:
+                logger.info(f"token2wav inputs: target_tokens shape={target_speech_tokens.shape}, min={target_speech_tokens.min().item()}, max={target_speech_tokens.max().item()}")
+                logger.info(f"token2wav inputs: prompt_tokens shape={prompt_speech_tokens.shape}, prompt_feat shape={prompt_speech_feat.shape}, embedding shape={prompt_spk_embedding.shape}")
+
                 tts_mel, _ = self.token2wav_model.model.flow.inference(
                     token=target_speech_tokens,
                     token_len=torch.tensor([target_speech_tokens.shape[1]], dtype=torch.int32).to(
@@ -358,6 +399,8 @@ class TritonPythonModel:
                     streaming=False,
                     finalize=True,
                 )
+
+                logger.info(f"flow output tts_mel: shape={tts_mel.shape}, min={tts_mel.min().item():.4f}, max={tts_mel.max().item():.4f}")
 
                 audio_hat, _ = self.token2wav_model.model.hift.inference(
                     speech_feat=tts_mel, cache_source=torch.zeros(1, 1, 0)

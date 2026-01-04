@@ -53,6 +53,10 @@ parameters [
   {
     key: "model_dir"
     value: {string_value: "/models/tts/assets"}
+  },
+  {
+    key: "use_trt"
+    value: {string_value: "false"}  # Set to "true" after verifying PyTorch works
   }
 ]
 
