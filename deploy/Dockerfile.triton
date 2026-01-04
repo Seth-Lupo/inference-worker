@@ -37,7 +37,7 @@ RUN pip install --no-cache-dir --force-reinstall numpy
 RUN pip install --no-cache-dir tritonclient[grpc]
 
 # Install latest vLLM
-RUN pip install --no-cache-dir vllm 
+RUN pip install --no-cache-dir vllm=0.9.1
 
 # Install vLLM backend for Triton (main branch - compatible with latest vLLM)
 RUN mkdir -p /opt/tritonserver/backends/vllm && \
