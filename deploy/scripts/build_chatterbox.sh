@@ -192,25 +192,47 @@ stage_download_models() {
         }
     fi
 
+    # Checkout files from LFS cache if needed
+    log_info "Checking out LFS files..."
+    (
+        cd "$clone_dir"
+        # Force checkout of LFS files
+        git lfs checkout 2>/dev/null || true
+        # Alternative: smudge the files manually
+        git lfs pull --include="onnx/${LANGUAGE_MODEL_ONNX}*" 2>/dev/null || true
+    )
+
     # Verify LFS files were downloaded (not just pointers)
     local lm_file="${clone_dir}/onnx/${LANGUAGE_MODEL_ONNX}"
-    if [[ -f "$lm_file" ]]; then
-        local size
-        size=$(get_file_size "$lm_file")
-        if [[ "$size" -lt 1000000 ]]; then
-            log_error "LFS files appear to be pointers. Retrying LFS pull..."
-            (cd "$clone_dir" && git lfs pull --include="onnx/*")
-            size=$(get_file_size "$lm_file")
-            if [[ "$size" -lt 1000000 ]]; then
-                log_error "Failed to download LFS files. Check git-lfs installation."
-                return 1
-            fi
-        fi
-        log_info "Language model size: $(numfmt --to=iec "$size" 2>/dev/null || echo "${size}B")"
-    else
+    if [[ ! -f "$lm_file" ]]; then
+        log_warn "File not in expected location, checking LFS cache..."
+        # Try to find in LFS cache and copy
+        (
+            cd "$clone_dir"
+            git lfs ls-files -l 2>/dev/null | head -5
+        )
         log_error "Expected file not found: $lm_file"
         return 1
     fi
+
+    local size
+    size=$(get_file_size "$lm_file")
+    if [[ "$size" -lt 1000000 ]]; then
+        log_warn "File appears to be LFS pointer (${size} bytes). Attempting manual checkout..."
+        (
+            cd "$clone_dir"
+            # Force smudge of all ONNX files
+            find onnx -name "*.onnx*" -exec git lfs smudge < {} \; 2>/dev/null || true
+            git lfs checkout onnx/ 2>/dev/null || true
+        )
+        size=$(get_file_size "$lm_file")
+        if [[ "$size" -lt 1000000 ]]; then
+            log_error "Failed to checkout LFS files. Size: ${size} bytes"
+            log_info "Try manually: cd ${clone_dir} && git lfs fetch --all && git lfs checkout"
+            return 1
+        fi
+    fi
+    log_info "Language model size: $(numfmt --to=iec "$size" 2>/dev/null || echo "${size}B")"
 
     # Copy files to onnx_dir
     mkdir -p "$onnx_dir"
