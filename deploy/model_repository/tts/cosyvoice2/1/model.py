@@ -340,18 +340,30 @@ class TritonPythonModel:
         return speech_feat
 
     def _llm_gen_thread(self, generated_ids_iter, semantic_token_ids_arr, llm_is_done_flag, llm_error_flag):
-        """LLM generation thread with degenerate sequence detection."""
+        """LLM generation thread with degenerate sequence detection.
+
+        IMPORTANT: TensorRT-LLM streaming returns CUMULATIVE output (all tokens so far),
+        not just new tokens. We must track what we've seen to avoid duplication.
+        """
         consecutive_same = 0
         last_token = None
         max_consecutive_same = 50  # If same token 50 times in a row, something is wrong
+        last_seen_length = 0  # Track cumulative output to extract only new tokens
 
         for generated_ids in generated_ids_iter:
             generated_ids = generated_ids.tolist()
             if len(generated_ids) == 0:
                 break
 
-            # Check for degenerate repetition
-            for token in generated_ids:
+            # TensorRT-LLM returns cumulative output - extract only NEW tokens
+            new_tokens = generated_ids[last_seen_length:]
+            last_seen_length = len(generated_ids)
+
+            if len(new_tokens) == 0:
+                continue
+
+            # Check for degenerate repetition in NEW tokens only
+            for token in new_tokens:
                 if token == last_token:
                     consecutive_same += 1
                     if consecutive_same >= max_consecutive_same:
@@ -366,7 +378,7 @@ class TritonPythonModel:
                     consecutive_same = 1
                     last_token = token
 
-            semantic_token_ids_arr.extend(generated_ids)
+            semantic_token_ids_arr.extend(new_tokens)
 
             # Log periodically
             if len(semantic_token_ids_arr) % 100 == 0:
