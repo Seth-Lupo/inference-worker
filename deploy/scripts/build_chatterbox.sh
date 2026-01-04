@@ -263,63 +263,51 @@ stage_download_models() {
 }
 
 # =============================================================================
-# Stage 1: Build TensorRT Engines
+# Stage 1: Validate ONNX Models (No TensorRT - models use custom ops)
 # =============================================================================
 stage_build_engines() {
-    log_step "Stage 1: Building TensorRT engines..."
+    log_step "Stage 1: Validating ONNX models..."
 
     local onnx_dir="${WORK_DIR}/onnx"
-    local engine_dir="${WORK_DIR}/engines"
 
     if [[ ! -d "$onnx_dir" ]]; then
         log_error "ONNX models not found. Run stage 0 first."
         return 1
     fi
 
-    mkdir -p "$engine_dir"
+    # These ONNX models use custom operators not supported by TensorRT:
+    # - speech_encoder: STFT (custom audio DSP)
+    # - conditional_decoder: MultiHeadAttention (com.microsoft domain)
+    # - language_model: likely similar custom ops
+    #
+    # Solution: Use ONNX Runtime with CUDA Execution Provider
+    # ONNX Runtime will use TensorRT EP for supported ops automatically
 
-    # Ensure Docker image exists
-    ensure_docker_image "$TRT_IMAGE"
+    log_info "Chatterbox ONNX models use custom operators (STFT, MultiHeadAttention)"
+    log_info "Skipping TensorRT engine build - will use ONNX Runtime with CUDA EP"
+    log_info ""
+    log_info "Models to be loaded by ONNX Runtime:"
 
-    # Build embed_tokens engine
-    log_info "Building embed_tokens engine..."
-    build_trt_engine \
-        "${onnx_dir}/${EMBED_TOKENS_ONNX}" \
-        "${engine_dir}/embed_tokens.engine" \
-        --fp16 \
-        "--minShapes=${EMBED_TOKENS_MIN}" \
-        "--optShapes=${EMBED_TOKENS_OPT}" \
-        "--maxShapes=${EMBED_TOKENS_MAX}"
+    for model in embed_tokens language_model speech_encoder conditional_decoder; do
+        local onnx_file
+        if [[ "$PRECISION" == "fp16" ]]; then
+            onnx_file="${onnx_dir}/${model}_fp16.onnx"
+        else
+            onnx_file="${onnx_dir}/${model}.onnx"
+        fi
 
-    # Speech encoder: Skip TensorRT - uses custom ONNX ops (STFT) not supported by TRT
-    # Will use ONNX Runtime with CUDA EP instead (configured in Triton model)
-    log_info "Skipping speech_encoder TensorRT build (uses unsupported STFT ops)"
-    log_info "Speech encoder will use ONNX Runtime with CUDA EP at runtime"
+        if [[ -f "$onnx_file" ]]; then
+            local size
+            size=$(get_file_size "$onnx_file")
+            log_info "  - ${model}: $(basename "$onnx_file") ($(numfmt --to=iec "$size" 2>/dev/null || echo "${size}B"))"
+        else
+            log_warn "  - ${model}: NOT FOUND"
+        fi
+    done
 
-    # Build conditional_decoder engine (single-step, easier)
-    log_info "Building conditional_decoder engine..."
-    build_trt_engine \
-        "${onnx_dir}/${CONDITIONAL_DECODER_ONNX}" \
-        "${engine_dir}/conditional_decoder.engine" \
-        --fp16 \
-        "--minShapes=${COND_DEC_MIN}" \
-        "--optShapes=${COND_DEC_OPT}" \
-        "--maxShapes=${COND_DEC_MAX}"
-
-    # Build language_model engine (largest, most complex)
-    # Note: This model has KV cache I/O which needs special handling
-    log_info "Building language_model engine (this may take 5-10 minutes)..."
-    build_trt_engine \
-        "${onnx_dir}/${LANGUAGE_MODEL_ONNX}" \
-        "${engine_dir}/language_model.engine" \
-        --fp16 \
-        --workspace=8192 \
-        "--minShapes=${LM_MIN}" \
-        "--optShapes=${LM_OPT}" \
-        "--maxShapes=${LM_MAX}"
-
-    log_info "All TensorRT engines built successfully"
-    ls -lh "${engine_dir}"/*.engine
+    log_info ""
+    log_info "ONNX Runtime will automatically use TensorRT EP for supported ops"
+    log_info "and fall back to CUDA EP for custom ops (STFT, MultiHeadAttention)"
 }
 
 # =============================================================================
@@ -340,18 +328,37 @@ stage_create_model_repo() {
     mkdir -p "${MODEL_REPO}/chatterbox_decoder/1"
     mkdir -p "${MODEL_REPO}/chatterbox_embed/1"
 
-    # Copy engines
-    log_info "Copying TensorRT engines..."
-    cp "${engine_dir}/language_model.engine" "${MODEL_REPO}/chatterbox_lm/1/" 2>/dev/null || true
-    cp "${engine_dir}/conditional_decoder.engine" "${MODEL_REPO}/chatterbox_decoder/1/" 2>/dev/null || true
-    cp "${engine_dir}/embed_tokens.engine" "${MODEL_REPO}/chatterbox_embed/1/" 2>/dev/null || true
+    # Copy ONNX models (all use ONNX Runtime, not TensorRT)
+    log_info "Copying ONNX models for ONNX Runtime..."
 
-    # Copy speech encoder ONNX (uses ONNX Runtime, not TensorRT)
-    log_info "Copying speech_encoder ONNX model..."
-    cp "${onnx_dir}/speech_encoder.onnx" "${MODEL_REPO}/chatterbox_encoder/1/model.onnx" 2>/dev/null || \
-    cp "${onnx_dir}/speech_encoder_fp16.onnx" "${MODEL_REPO}/chatterbox_encoder/1/model.onnx" 2>/dev/null || true
-    cp "${onnx_dir}/speech_encoder.onnx_data" "${MODEL_REPO}/chatterbox_encoder/1/model.onnx_data" 2>/dev/null || \
-    cp "${onnx_dir}/speech_encoder_fp16.onnx_data" "${MODEL_REPO}/chatterbox_encoder/1/model.onnx_data" 2>/dev/null || true
+    # Helper to copy model with data file
+    copy_onnx_model() {
+        local model_name="$1"
+        local dest_dir="$2"
+        local onnx_file data_file
+
+        if [[ "$PRECISION" == "fp16" ]]; then
+            onnx_file="${onnx_dir}/${model_name}_fp16.onnx"
+            data_file="${onnx_dir}/${model_name}_fp16.onnx_data"
+        else
+            onnx_file="${onnx_dir}/${model_name}.onnx"
+            data_file="${onnx_dir}/${model_name}.onnx_data"
+        fi
+
+        if [[ -f "$onnx_file" ]]; then
+            cp "$onnx_file" "${dest_dir}/model.onnx"
+            log_info "  Copied ${model_name} -> ${dest_dir}/model.onnx"
+        fi
+        if [[ -f "$data_file" ]]; then
+            cp "$data_file" "${dest_dir}/model.onnx_data"
+            log_info "  Copied ${model_name}_data -> ${dest_dir}/model.onnx_data"
+        fi
+    }
+
+    copy_onnx_model "embed_tokens" "${MODEL_REPO}/chatterbox_embed/1"
+    copy_onnx_model "language_model" "${MODEL_REPO}/chatterbox_lm/1"
+    copy_onnx_model "speech_encoder" "${MODEL_REPO}/chatterbox_encoder/1"
+    copy_onnx_model "conditional_decoder" "${MODEL_REPO}/chatterbox_decoder/1"
 
     # Copy config files
     log_info "Copying configuration files..."

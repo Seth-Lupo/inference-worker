@@ -1,5 +1,5 @@
 name: "chatterbox_decoder"
-platform: "tensorrt_plan"
+platform: "onnxruntime_onnx"
 max_batch_size: 8
 
 input [
@@ -10,7 +10,7 @@ input [
   },
   {
     name: "conditioning"
-    data_type: TYPE_FP16
+    data_type: TYPE_FP32
     dims: [256]
   }
 ]
@@ -18,7 +18,7 @@ input [
 output [
   {
     name: "mel_spectrogram"
-    data_type: TYPE_FP16
+    data_type: TYPE_FP32
     dims: [80, -1]
   }
 ]
@@ -29,6 +29,14 @@ instance_group [
     kind: KIND_GPU
   }
 ]
+
+optimization {
+  execution_accelerators {
+    gpu_execution_accelerator : [
+      { name : "cuda" }
+    ]
+  }
+}
 
 dynamic_batching {
   preferred_batch_size: [1, 2, 4]
