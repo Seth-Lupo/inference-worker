@@ -314,6 +314,8 @@ build_trt_vocoder() {
 
     # Download ONNX model for conditional_decoder only
     local onnx_file="conditional_decoder_fp16.onnx"
+    local onnx_decomposed="conditional_decoder_decomposed.onnx"
+
     if [[ ! -f "${onnx_dir}/${onnx_file}" ]] || ! is_real_file "${onnx_dir}/${onnx_file}" 1000; then
         log_info "Downloading ONNX vocoder model..."
 
@@ -336,11 +338,32 @@ build_trt_vocoder() {
         return 1
     fi
 
+    # Decompose Microsoft custom ops to standard ONNX ops
+    # The original ONNX uses com.microsoft::MultiHeadAttention which TRT doesn't support
+    # This converts it to standard MatMul + Softmax ops while preserving weights
+    if [[ ! -f "${onnx_dir}/${onnx_decomposed}" ]]; then
+        log_info "Decomposing custom attention ops to standard ONNX..."
+
+        # Ensure ONNX tools are installed
+        if ! python3 -c "import onnx" 2>/dev/null; then
+            log_info "Installing ONNX dependencies..."
+            pip install --quiet onnx onnx-graphsurgeon onnxruntime-tools 2>/dev/null || \
+                pip3 install --quiet onnx onnx-graphsurgeon onnxruntime-tools 2>/dev/null || true
+        fi
+
+        python3 "${SCRIPT_DIR}/decompose_onnx.py" \
+            --input "${onnx_dir}/${onnx_file}" \
+            --output "${onnx_dir}/${onnx_decomposed}" || {
+            log_warn "ONNX decomposition failed - trying direct TRT build..."
+            onnx_decomposed="$onnx_file"
+        }
+    fi
+
     # Build TensorRT engine
     # Shapes: progressive chunks 4,8,16,32,32 tokens -> min=4, opt=32, max=64
     log_info "Building TensorRT engine (this may take a few minutes)..."
     build_trt_engine \
-        "${onnx_dir}/${onnx_file}" \
+        "${onnx_dir}/${onnx_decomposed}" \
         "${TRT_ENGINE_DIR}/conditional_decoder.engine" \
         "--fp16" \
         "--minShapes=speech_tokens:1x4" \
