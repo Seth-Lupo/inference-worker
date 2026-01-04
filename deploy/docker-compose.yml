@@ -25,6 +25,9 @@ services:
     image: nvcr.io/nvidia/tritonserver:24.12-vllm-python-py3
     container_name: voice-agent-triton
     restart: unless-stopped
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.triton
 
     deploy:
       resources:
@@ -68,10 +71,12 @@ services:
       - TRITON_GRPC_URL=localhost:8001
       - T3_MODEL_NAME=t3
       # Progressive streaming for low first-chunk latency
-      - TTS_PROGRESSIVE_CHUNKS=4,8,16,32,32
-      - TTS_PROGRESSIVE_STEPS=1,2,5,7,10
+      - TTS_PROGRESSIVE_CHUNKS=4,8,16,32,32,32,32,32
+      - TTS_PROGRESSIVE_STEPS=2,3,5,7,7,7,7,7
       - TTS_CHUNK_TOKENS=32
-      - S3GEN_DIFFUSION_STEPS=10
+      - S3GEN_DIFFUSION_STEPS=7
+      # torch.compile for S3Gen optimization
+      - USE_TORCH_COMPILE=true
 
     command: >
       tritonserver
