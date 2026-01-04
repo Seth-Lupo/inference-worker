@@ -74,7 +74,7 @@ fi
 log_step "Building Qwen3 LLM for vLLM backend"
 echo ""
 log_info "Model: ${HF_REPO}"
-log_info "Cache: ${HF_CACHE}"
+log_info "Weights: ${WEIGHTS_DIR}"
 echo ""
 
 # Ensure model directory exists
