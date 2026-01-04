@@ -301,7 +301,8 @@ class TritonPythonModel:
 
         # Extract and convert output waveform
         waveform = pb_utils.get_output_tensor_by_name(inference_response, 'waveform')
-        waveform = torch.utils.dlpack.from_dlpack(waveform.to_dlpack()).cpu()
+        waveform = torch.utils.dlpack.from_dlpack(waveform.to_dlpack())
+        self.logger.log_info(f"forward_token2wav received: shape={waveform.shape}, min={waveform.min().item():.4f}, max={waveform.max().item():.4f}")
 
         return waveform
 

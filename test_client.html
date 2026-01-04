@@ -193,9 +193,10 @@
         let processor = null;
         let isConnected = false;
 
-        // Audio playback
+        // Audio playback queue
         let audioQueue = [];
         let isPlaying = false;
+        let nextPlayTime = 0;
 
         // Visualizer
         const canvas = document.getElementById('waveform');
@@ -250,6 +251,15 @@
                 audioContext = new (window.AudioContext || window.webkitAudioContext)({
                     sampleRate: 16000
                 });
+
+                // Resume audio context (required by browser autoplay policy)
+                if (audioContext.state === 'suspended') {
+                    await audioContext.resume();
+                    log('Audio context resumed');
+                }
+
+                // Reset playback timing
+                nextPlayTime = 0;
 
                 // Set up analyser for visualization
                 analyser = audioContext.createAnalyser();
@@ -376,22 +386,59 @@
         async function playAudio(arrayBuffer) {
             if (!audioContext) return;
 
-            // Convert Int16 to Float32
-            const int16 = new Int16Array(arrayBuffer);
-            const float32 = new Float32Array(int16.length);
-            for (let i = 0; i < int16.length; i++) {
-                float32[i] = int16[i] / 32768;
+            try {
+                // Skip empty chunks
+                if (arrayBuffer.byteLength === 0) {
+                    log('Empty audio chunk (final marker), skipping', 'info');
+                    return;
+                }
+
+                // Resume if suspended
+                if (audioContext.state === 'suspended') {
+                    await audioContext.resume();
+                }
+
+                // Convert Int16 to Float32
+                const int16 = new Int16Array(arrayBuffer);
+                const float32 = new Float32Array(int16.length);
+
+                let minVal = Infinity, maxVal = -Infinity;
+                for (let i = 0; i < int16.length; i++) {
+                    float32[i] = int16[i] / 32768;
+                    minVal = Math.min(minVal, int16[i]);
+                    maxVal = Math.max(maxVal, int16[i]);
+                }
+
+                log(`🔊 Audio: ${int16.length} samples, range=[${minVal}, ${maxVal}]`, 'info');
+
+                // Check if audio is silent
+                if (maxVal === 0 && minVal === 0) {
+                    log('⚠️ Audio is all zeros!', 'error');
+                    return;
+                }
+
+                // Create audio buffer at audioContext's actual sample rate
+                const audioBuffer = audioContext.createBuffer(1, float32.length, 16000);
+                audioBuffer.copyToChannel(float32, 0);
+
+                // Schedule playback to avoid gaps/overlaps
+                const currentTime = audioContext.currentTime;
+                if (nextPlayTime < currentTime) {
+                    nextPlayTime = currentTime;
+                }
+
+                // Play
+                const source = audioContext.createBufferSource();
+                source.buffer = audioBuffer;
+                source.connect(audioContext.destination);
+                source.start(nextPlayTime);
+
+                // Schedule next chunk after this one
+                nextPlayTime += audioBuffer.duration;
+
+            } catch (error) {
+                log(`Audio playback error: ${error.message}`, 'error');
             }
-
-            // Create audio buffer
-            const audioBuffer = audioContext.createBuffer(1, float32.length, 16000);
-            audioBuffer.copyToChannel(float32, 0);
-
-            // Play
-            const source = audioContext.createBufferSource();
-            source.buffer = audioBuffer;
-            source.connect(audioContext.destination);
-            source.start();
         }
 
         function drawWaveform() {

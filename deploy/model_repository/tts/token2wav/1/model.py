@@ -363,9 +363,11 @@ class TritonPythonModel:
                     speech_feat=tts_mel, cache_source=torch.zeros(1, 1, 0)
                 )
 
-            generated_wave = audio_hat.squeeze(0).cpu().numpy()
+            # Ensure tensor is contiguous and on CPU for dlpack
+            audio_out = audio_hat.squeeze(0).contiguous()
+            logger.info(f"token2wav audio shape={audio_out.shape}, min={audio_out.min().item():.4f}, max={audio_out.max().item():.4f}")
 
-            wav_tensor = pb_utils.Tensor.from_dlpack("waveform", to_dlpack(audio_hat))
+            wav_tensor = pb_utils.Tensor.from_dlpack("waveform", to_dlpack(audio_out.cpu()))
             inference_response = pb_utils.InferenceResponse(output_tensors=[wav_tensor])
             responses.append(inference_response)
 
