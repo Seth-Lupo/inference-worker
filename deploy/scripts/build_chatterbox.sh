@@ -292,11 +292,19 @@ stage_build_engines() {
         "--maxShapes=${EMBED_TOKENS_MAX}"
 
     # Build speech_encoder engine
-    log_info "Building speech_encoder engine..."
+    # Note: Speech encoder has STFT which requires FP32 input, so we use FP32 model
+    log_info "Building speech_encoder engine (FP32 - STFT requires it)..."
+    local speech_enc_onnx="speech_encoder.onnx"  # Use FP32 version
+    if [[ ! -f "${onnx_dir}/${speech_enc_onnx}" ]]; then
+        # Download FP32 version if not present
+        log_info "Downloading FP32 speech_encoder..."
+        (cd "${WORK_DIR}/chatterbox-turbo-ONNX" && git lfs pull --include="onnx/speech_encoder.onnx,onnx/speech_encoder.onnx_data")
+        cp "${WORK_DIR}/chatterbox-turbo-ONNX/onnx/speech_encoder.onnx"* "${onnx_dir}/" 2>/dev/null || true
+    fi
     build_trt_engine \
-        "${onnx_dir}/${SPEECH_ENCODER_ONNX}" \
+        "${onnx_dir}/${speech_enc_onnx}" \
         "${engine_dir}/speech_encoder.engine" \
-        --fp16 \
+        --fp32 \
         "--minShapes=${SPEECH_ENC_MIN}" \
         "--optShapes=${SPEECH_ENC_OPT}" \
         "--maxShapes=${SPEECH_ENC_MAX}"
