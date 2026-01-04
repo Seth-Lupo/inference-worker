@@ -1,0 +1,36 @@
+name: "chatterbox_decoder"
+platform: "tensorrt_plan"
+max_batch_size: 8
+
+input [
+  {
+    name: "input_ids"
+    data_type: TYPE_INT64
+    dims: [-1]
+  },
+  {
+    name: "conditioning"
+    data_type: TYPE_FP16
+    dims: [256]
+  }
+]
+
+output [
+  {
+    name: "mel_spectrogram"
+    data_type: TYPE_FP16
+    dims: [80, -1]
+  }
+]
+
+instance_group [
+  {
+    count: 1
+    kind: KIND_GPU
+  }
+]
+
+dynamic_batching {
+  preferred_batch_size: [1, 2, 4]
+  max_queue_delay_microseconds: 100
+}

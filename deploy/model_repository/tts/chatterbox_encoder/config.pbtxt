@@ -1,0 +1,31 @@
+name: "chatterbox_encoder"
+platform: "tensorrt_plan"
+max_batch_size: 8
+
+input [
+  {
+    name: "input_features"
+    data_type: TYPE_FP16
+    dims: [-1, 80]
+  }
+]
+
+output [
+  {
+    name: "conditioning"
+    data_type: TYPE_FP16
+    dims: [256]
+  }
+]
+
+instance_group [
+  {
+    count: 1
+    kind: KIND_GPU
+  }
+]
+
+dynamic_batching {
+  preferred_batch_size: [1, 2, 4]
+  max_queue_delay_microseconds: 100
+}

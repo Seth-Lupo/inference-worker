@@ -1,0 +1,49 @@
+name: "chatterbox_lm"
+platform: "tensorrt_plan"
+max_batch_size: 8
+
+input [
+  {
+    name: "inputs_embeds"
+    data_type: TYPE_FP16
+    dims: [-1, 896]
+  },
+  {
+    name: "attention_mask"
+    data_type: TYPE_INT64
+    dims: [-1]
+  },
+  {
+    name: "position_ids"
+    data_type: TYPE_INT64
+    dims: [-1]
+  },
+  {
+    name: "past_key_values"
+    data_type: TYPE_FP16
+    dims: [24, 2, -1, 16, 64]
+    optional: true
+  }
+]
+
+output [
+  {
+    name: "logits"
+    data_type: TYPE_FP16
+    dims: [-1, 8195]
+  },
+  {
+    name: "present_key_values"
+    data_type: TYPE_FP16
+    dims: [24, 2, -1, 16, 64]
+  }
+]
+
+instance_group [
+  {
+    count: 1
+    kind: KIND_GPU
+  }
+]
+
+# No dynamic batching for autoregressive - each request has its own KV cache

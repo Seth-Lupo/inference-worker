@@ -8,9 +8,9 @@ Usage:
     python run.py --host 127.0.0.1   # Bind to localhost only
 
 Environment variables:
-    TTS_BACKEND           - "mock" or "cosyvoice" (default: cosyvoice)
+    TTS_BACKEND           - "mock", "cosyvoice", or "chatterbox" (default: chatterbox)
     TRITON_URL            - Triton gRPC URL (default: localhost:8001)
-    TTS_MODEL             - TTS model name (default: cosyvoice2)
+    TTS_MODEL             - TTS model name (default: chatterbox)
     REFERENCE_AUDIO_PATH  - Path to reference audio for voice cloning
     REFERENCE_TEXT        - Text spoken in reference audio
     LOG_LEVEL             - DEBUG, INFO, WARNING, ERROR (default: INFO)
@@ -46,9 +46,9 @@ def main():
     # TTS config from env vars with CLI override
     parser.add_argument(
         "--tts-backend",
-        choices=["mock", "cosyvoice"],
-        default=os.environ.get("TTS_BACKEND", "cosyvoice"),
-        help="TTS backend (env: TTS_BACKEND, default: cosyvoice)"
+        choices=["mock", "cosyvoice", "chatterbox"],
+        default=os.environ.get("TTS_BACKEND", "chatterbox"),
+        help="TTS backend (env: TTS_BACKEND, default: chatterbox)"
     )
     parser.add_argument(
         "--triton-url",
@@ -57,8 +57,8 @@ def main():
     )
     parser.add_argument(
         "--tts-model",
-        default=os.environ.get("TTS_MODEL", "cosyvoice2"),
-        help="TTS model name (env: TTS_MODEL, default: cosyvoice2)"
+        default=os.environ.get("TTS_MODEL", "chatterbox"),
+        help="TTS model name (env: TTS_MODEL, default: chatterbox)"
     )
     parser.add_argument(
         "--reference-audio",

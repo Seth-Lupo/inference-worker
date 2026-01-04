@@ -170,10 +170,14 @@ class TritonPythonModel:
             inputs=input_tensor_list,
         )
 
+        self.logger.log_info(f"Calling LLM with decoupled={self.decoupled}")
         llm_responses = llm_request.exec(decoupled=self.decoupled)
         if self.decoupled:
+            response_count = 0
             for llm_response in llm_responses:
+                response_count += 1
                 if llm_response.has_error():
+                    self.logger.log_error(f"LLM response {response_count} has error: {llm_response.error().message()}")
                     raise pb_utils.TritonModelException(llm_response.error().message())
 
                 # Extract and process output
@@ -185,7 +189,11 @@ class TritonPythonModel:
                 # Get actual output IDs up to the sequence length
                 actual_output_ids = output_ids[0][0][:seq_lens[0][0]]
 
+                self.logger.log_info(f"LLM response {response_count}: seq_len={seq_lens[0][0]}, output shape={output_ids.shape}")
+
                 yield actual_output_ids
+
+            self.logger.log_info(f"LLM finished: {response_count} total responses")
         else:
             llm_response = llm_responses
             if llm_response.has_error():
@@ -441,6 +449,7 @@ class TritonPythonModel:
             )
 
             # Generate semantic tokens with LLM
+            self.logger.log_info(f"Starting LLM generation: input_ids shape={input_ids.shape}, eos_token_id={self.eos_token_id}")
             generated_ids_iter = self.forward_llm(input_ids)
 
             token2wav_request_id = request_id or str(uuid4())

@@ -115,3 +115,50 @@ cosyvoice:
       min: "x:2x80x4,mask:2x1x4,mu:2x80x4,cond:2x80x4"
       opt: "x:2x80x500,mask:2x1x500,mu:2x80x500,cond:2x80x500"
       max: "x:2x80x3000,mask:2x1x3000,mu:2x80x3000,cond:2x80x3000"
+
+# -----------------------------------------------------------------------------
+# TTS: Chatterbox Turbo (350M, TensorRT-accelerated)
+# -----------------------------------------------------------------------------
+chatterbox:
+  # Model source (ONNX exports from HuggingFace)
+  hf_repo: "ResembleAI/chatterbox-turbo-ONNX"
+
+  # Precision for TensorRT engines: fp16 or fp32
+  precision: "fp16"
+
+  # Native sample rate
+  sample_rate: 24000
+
+  # Triton settings
+  max_batch_size: 8
+  max_concurrent: 4     # KV cache slots for concurrent generation
+  decoupled_mode: true  # Enable streaming
+
+  # Generation parameters
+  temperature: 0.8
+  top_p: 0.95
+  top_k: 50
+  repetition_penalty: 1.2
+  token_chunk_size: 25  # Tokens per audio chunk (~1 second)
+
+  # Triton paths (inside container)
+  assets_path: "/models/tts/chatterbox_assets"
+
+  # Dynamic shapes for each component
+  shapes:
+    embed_tokens:
+      min: "input_ids:1x1"
+      opt: "input_ids:4x256"
+      max: "input_ids:8x1024"
+    language_model:
+      min: "inputs_embeds:1x1x896,attention_mask:1x1,position_ids:1x1"
+      opt: "inputs_embeds:4x256x896,attention_mask:4x256,position_ids:4x256"
+      max: "inputs_embeds:8x1024x896,attention_mask:8x1024,position_ids:8x1024"
+    speech_encoder:
+      min: "input_features:1x1x80"
+      opt: "input_features:1x500x80"
+      max: "input_features:1x3000x80"
+    conditional_decoder:
+      min: "input_ids:1x1"
+      opt: "input_ids:1x256"
+      max: "input_ids:1x1024"
