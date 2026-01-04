@@ -146,38 +146,32 @@ stage_download() {
         return 0
     fi
 
-    # Clone repo (shallow, no LFS yet)
-    hf_clone_shallow "$HF_REPO" "$CLONE_DIR" || {
+    # Clone with full LFS (like parakeet script)
+    log_info "Cloning ${HF_REPO} with LFS..."
+    hf_clone "$HF_REPO" "$CLONE_DIR" || {
         log_error "Failed to clone from HuggingFace"
         return 1
     }
 
-    # Pull specific LFS files based on precision
-    if [[ "$PRECISION" == "fp16" ]]; then
-        hf_lfs_pull "$CLONE_DIR" \
-            --include "onnx/*_fp16.onnx" \
-            --include "onnx/*_fp16.onnx_data" \
-            --include "*.json"
-    else
-        hf_lfs_pull "$CLONE_DIR" \
-            --include "onnx/*.onnx" \
-            --include "onnx/*.onnx_data" \
-            --exclude "onnx/*_fp16*" \
-            --include "*.json"
-    fi
-
-    # Copy to onnx_dir
+    # Copy needed files to onnx_dir based on precision
+    log_info "Copying ${PRECISION} ONNX models..."
     cp "${CLONE_DIR}/onnx/${EMBED_ONNX}"* "$ONNX_DIR/" 2>/dev/null || true
     cp "${CLONE_DIR}/onnx/${LM_ONNX}"* "$ONNX_DIR/" 2>/dev/null || true
     cp "${CLONE_DIR}/onnx/${ENCODER_ONNX}"* "$ONNX_DIR/" 2>/dev/null || true
     cp "${CLONE_DIR}/onnx/${DECODER_ONNX}"* "$ONNX_DIR/" 2>/dev/null || true
     cp "${CLONE_DIR}"/*.json "$ONNX_DIR/" 2>/dev/null || true
 
-    # Verify key files
+    # Verify key files exist and are real (not LFS pointers)
     local required_files=("$EMBED_ONNX" "$LM_ONNX" "$ENCODER_ONNX" "$DECODER_ONNX")
     for file in "${required_files[@]}"; do
         if [[ ! -f "${ONNX_DIR}/${file}" ]]; then
-            log_warn "Missing ONNX file: ${file}"
+            log_error "Missing ONNX file: ${file}"
+            return 1
+        fi
+        if ! is_real_file "${ONNX_DIR}/${file}" 1000; then
+            log_error "ONNX file is LFS pointer (not downloaded): ${file}"
+            log_error "Try: cd ${CLONE_DIR} && git lfs pull"
+            return 1
         fi
     done
 
@@ -186,47 +180,8 @@ stage_download() {
 }
 
 # =============================================================================
-# Stage 1: Build TensorRT Engines
+# Stage 1: Build TensorRT Engines (uses build_trt_engine from common.sh)
 # =============================================================================
-build_engine() {
-    local name="$1"
-    local onnx_file="$2"
-    local engine_file="$3"
-    local shapes="$4"
-
-    if [[ -f "$engine_file" ]]; then
-        log_info "  $name: Engine exists, skipping"
-        return 0
-    fi
-
-    if [[ ! -f "$onnx_file" ]]; then
-        log_warn "  $name: ONNX not found, skipping"
-        return 1
-    fi
-
-    log_info "  $name: Building TensorRT engine..."
-
-    # Parse shapes (format: "name:min,name:opt,name:max")
-    local min_shape opt_shape max_shape
-    IFS=',' read -r min_shape opt_shape max_shape <<< "$shapes"
-
-    local cmd="trtexec --onnx=$onnx_file --saveEngine=$engine_file"
-    cmd+=" --minShapes=$min_shape --optShapes=$opt_shape --maxShapes=$max_shape"
-    [[ "$PRECISION" == "fp16" ]] && cmd+=" --fp16"
-    cmd+=" --workspace=4096"
-
-    # Try to build
-    if $cmd > "${engine_file%.engine}.log" 2>&1; then
-        local size=$(get_file_size "$engine_file")
-        log_info "  $name: Built successfully ($(numfmt --to=iec "$size" 2>/dev/null || echo "${size}B"))"
-        return 0
-    else
-        log_warn "  $name: TensorRT build failed, will use ONNX Runtime"
-        cat "${engine_file%.engine}.log" | tail -20
-        return 1
-    fi
-}
-
 stage_build_engines() {
     log_step "Stage 1: Building TensorRT engines..."
 
@@ -239,52 +194,75 @@ stage_build_engines() {
         return 1
     fi
 
-    if ! command -v trtexec &>/dev/null; then
-        log_error "trtexec not found. Run inside TensorRT container:"
-        log_error "  docker compose --profile build run model-builder"
-        return 1
-    fi
+    # Determine precision flag
+    local precision_flag="--fp16"
+    [[ "$PRECISION" == "fp32" ]] && precision_flag="--fp32"
 
-    # Build each non-autoregressive model
+    # Build each model using build_trt_engine from common.sh (runs in Docker)
     local success=0
     local failed=0
 
     # embed_tokens
-    if build_engine "embed_tokens" \
+    log_info "Building embed_tokens engine..."
+    local shapes="${TRT_SHAPES[embed_tokens]}"
+    IFS=',' read -r min_shape opt_shape max_shape <<< "$shapes"
+    if build_trt_engine \
         "${ONNX_DIR}/${EMBED_ONNX}" \
         "${engine_dir}/embed_tokens.engine" \
-        "${TRT_SHAPES[embed_tokens]}"; then
+        "$precision_flag" \
+        "--minShapes=${min_shape}" \
+        "--optShapes=${opt_shape}" \
+        "--maxShapes=${max_shape}"; then
         ((success++))
     else
         ((failed++))
     fi
 
-    # speech_encoder (mel features input, no STFT needed in TRT)
-    if build_engine "speech_encoder" \
+    # speech_encoder
+    log_info "Building speech_encoder engine..."
+    shapes="${TRT_SHAPES[speech_encoder]}"
+    IFS=',' read -r min_shape opt_shape max_shape <<< "$shapes"
+    if build_trt_engine \
         "${ONNX_DIR}/${ENCODER_ONNX}" \
         "${engine_dir}/speech_encoder.engine" \
-        "${TRT_SHAPES[speech_encoder]}"; then
+        "$precision_flag" \
+        "--minShapes=${min_shape}" \
+        "--optShapes=${opt_shape}" \
+        "--maxShapes=${max_shape}"; then
         ((success++))
     else
         ((failed++))
     fi
 
-    # conditional_decoder (vocoder: speech tokens -> audio)
-    if build_engine "conditional_decoder" \
+    # conditional_decoder (vocoder)
+    log_info "Building conditional_decoder engine..."
+    shapes="${TRT_SHAPES[conditional_decoder]}"
+    IFS=',' read -r min_shape opt_shape max_shape <<< "$shapes"
+    if build_trt_engine \
         "${ONNX_DIR}/${DECODER_ONNX}" \
         "${engine_dir}/conditional_decoder.engine" \
-        "${TRT_SHAPES[conditional_decoder]}"; then
+        "$precision_flag" \
+        "--minShapes=${min_shape}" \
+        "--optShapes=${opt_shape}" \
+        "--maxShapes=${max_shape}"; then
         ((success++))
     else
         ((failed++))
-        log_info "  conditional_decoder: TRT failed, will use ONNX Runtime fallback"
     fi
 
-    echo ""
-    log_info "TensorRT build complete: $success succeeded, $failed failed"
+    log_info "TRT build complete: ${success} succeeded, ${failed} failed"
 
-    # Language model stays as ONNX (for vLLM or ONNX Runtime)
-    log_info "language_model: Kept as ONNX (use vLLM or ONNX Runtime)"
+    if [[ $success -eq 0 ]]; then
+        log_error "No engines built successfully"
+        return 1
+    fi
+
+    # Copy engines to model dir
+    mkdir -p "${MODEL_DIR}/1/engines"
+    cp "${engine_dir}"/*.engine "${MODEL_DIR}/1/engines/" 2>/dev/null || true
+
+    log_info "Engines copied to: ${MODEL_DIR}/1/engines/"
+    ls -lh "${MODEL_DIR}/1/engines/"*.engine 2>/dev/null || true
 }
 
 # =============================================================================
