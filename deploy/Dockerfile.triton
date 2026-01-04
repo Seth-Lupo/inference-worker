@@ -1,5 +1,7 @@
 # Triton Inference Server with vLLM + Python backends
-# For serving Chatterbox TTS with T3 vLLM backend
+# For serving:
+#   - Chatterbox TTS (PyTorch + torch.compile)
+#   - Parakeet ASR (BLS + native TensorRT backends)
 FROM nvcr.io/nvidia/tritonserver:24.12-vllm-python-py3
 
 # Install system dependencies
@@ -24,7 +26,7 @@ RUN TORCH_VERSION=$(pip show torch | grep Version | cut -d' ' -f2) && \
 # Install grpcio binary (for Triton client)
 RUN pip install --no-cache-dir --only-binary :all: grpcio grpcio-tools
 
-# Install Triton client for Python backend to call T3
+# Install Triton client for BLS (Python backend calling other Triton models)
 RUN pip install --no-cache-dir tritonclient[grpc]
 
 # Install dependencies for Chatterbox TTS
@@ -43,8 +45,3 @@ RUN pip install --no-cache-dir -c /tmp/constraints.txt \
         conformer \
         s3tokenizer \
         huggingface_hub
-
-# Install TensorRT Python bindings for TRTVocoder
-# Check if tensorrt is already available, install if not
-RUN python3 -c "import tensorrt" 2>/dev/null || \
-    pip install --no-cache-dir tensorrt

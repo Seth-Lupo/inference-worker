@@ -1,8 +1,18 @@
 """
-Parakeet TDT 0.6B V2 - Triton Python Backend
+Parakeet TDT 0.6B V2 - BLS Orchestrator
 
-Uses TensorRT engines for GPU inference.
-Architecture: encoder + decoder_joint (combined decoder/joiner from HuggingFace).
+Business Logic Scripting model that orchestrates:
+- parakeet_encoder (native TensorRT backend)
+- parakeet_decoder (native TensorRT backend)
+
+This Python model only handles:
+1. Audio preprocessing (mel spectrogram)
+2. Calling encoder ONCE via Triton internal API
+3. Autoregressive decoding loop calling decoder
+4. Token to text conversion
+
+The heavy compute (encoder, decoder) runs on native TensorRT backends
+for maximum performance.
 """
 import os
 import json
@@ -10,103 +20,48 @@ import numpy as np
 import triton_python_backend_utils as pb_utils
 
 
-class TensorRTInference:
-    """TensorRT engine wrapper with dynamic shape support."""
-
-    def __init__(self, engine_path, device_id=0):
-        import tensorrt as trt
-        import torch
-
-        self.logger = trt.Logger(trt.Logger.WARNING)
-        self.runtime = trt.Runtime(self.logger)
-
-        with open(engine_path, "rb") as f:
-            self.engine = self.runtime.deserialize_cuda_engine(f.read())
-
-        self.context = self.engine.create_execution_context()
-        self.stream = torch.cuda.Stream()
-
-        # Get binding info
-        self.input_names = []
-        self.output_names = []
-        self.bindings = {}
-
-        for i in range(self.engine.num_io_tensors):
-            name = self.engine.get_tensor_name(i)
-            mode = self.engine.get_tensor_mode(name)
-            shape = self.engine.get_tensor_shape(name)
-            dtype = trt.nptype(self.engine.get_tensor_dtype(name))
-
-            if mode == trt.TensorIOMode.INPUT:
-                self.input_names.append(name)
-            else:
-                self.output_names.append(name)
-
-            self.bindings[name] = {"shape": shape, "dtype": dtype}
-
-    def infer(self, inputs_dict):
-        """Run inference with named inputs."""
-        import torch
-
-        # Set input shapes and addresses
-        for name, tensor in inputs_dict.items():
-            if name in self.input_names:
-                self.context.set_input_shape(name, tuple(tensor.shape))
-                self.context.set_tensor_address(name, tensor.data_ptr())
-
-        # Allocate and set outputs
-        outputs = {}
-        for name in self.output_names:
-            shape = self.context.get_tensor_shape(name)
-            dtype = self.bindings[name]["dtype"]
-            torch_dtype = torch.from_numpy(np.array([], dtype=dtype)).dtype
-            out = torch.empty(tuple(shape), dtype=torch_dtype, device="cuda")
-            outputs[name] = out
-            self.context.set_tensor_address(name, out.data_ptr())
-
-        # Execute
-        self.context.execute_async_v3(self.stream.cuda_stream)
-        self.stream.synchronize()
-
-        return outputs
-
-
 class TritonPythonModel:
-    """Parakeet TDT ASR using TensorRT GPU."""
+    """Parakeet TDT ASR - BLS orchestrating native TRT backends."""
 
     def initialize(self, args):
-        """Load pre-built TensorRT engines for GPU inference."""
+        """Load vocabulary and prepare for inference."""
         import torch
 
         self.model_config = json.loads(args["model_config"])
         model_dir = os.path.dirname(os.path.realpath(__file__))
-        engine_dir = os.path.join(model_dir, "engines")
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        pb_utils.Logger.log_info(f"Loading Parakeet from {model_dir}")
+        self.dtype = torch.float16  # Match TRT engine precision
 
-        # Check for TensorRT engines
-        encoder_engine = os.path.join(engine_dir, "encoder.engine")
-        decoder_joint_engine = os.path.join(engine_dir, "decoder_joint.engine")
+        pb_utils.Logger.log_info(f"Parakeet BLS: Initializing")
+        pb_utils.Logger.log_info(f"  Model dir: {model_dir}")
+        pb_utils.Logger.log_info(f"  Device: {self.device}")
 
-        if not os.path.exists(encoder_engine):
-            raise RuntimeError(f"Encoder engine not found: {encoder_engine}")
-        if not os.path.exists(decoder_joint_engine):
-            raise RuntimeError(f"Decoder_joint engine not found: {decoder_joint_engine}")
-
-        pb_utils.Logger.log_info("Loading TensorRT engines...")
-        self.encoder = TensorRTInference(encoder_engine)
-        self.decoder_joint = TensorRTInference(decoder_joint_engine)
-        pb_utils.Logger.log_info("TensorRT engines loaded")
-
-        # Load vocabulary (try vocab.txt first, then tokens.txt)
+        # Load vocabulary
         vocab_path = os.path.join(model_dir, "vocab.txt")
         if not os.path.exists(vocab_path):
             vocab_path = os.path.join(model_dir, "tokens.txt")
         self.vocab = self._load_vocab(vocab_path)
-        self.blank_id = 0  # Usually blank is 0
+        self.blank_id = 0
+        self.vocab_size = len(self.vocab)
 
-        pb_utils.Logger.log_info(f"Parakeet initialized: vocab={len(self.vocab)}, device={self.device}")
+        pb_utils.Logger.log_info(f"  Vocab size: {self.vocab_size}")
+
+        # Mel spectrogram parameters
+        self.sample_rate = 16000
+        self.n_fft = 512
+        self.hop_length = 160
+        self.n_mels = 128
+
+        # Precompute mel filterbank
+        self.mel_basis = self._mel_filterbank(
+            self.sample_rate, self.n_fft, self.n_mels
+        ).to(self.device).to(self.dtype)
+
+        # LSTM hidden size for decoder states
+        self.hidden_size = 640
+
+        pb_utils.Logger.log_info("Parakeet BLS: Initialized - ready to call native TRT backends")
 
     def _load_vocab(self, path):
         """Load token vocabulary."""
@@ -118,70 +73,12 @@ class TritonPythonModel:
                     vocab[i] = token
         return vocab
 
-    def execute(self, requests):
-        """Run inference on audio."""
-        import torch
-
-        responses = []
-
-        for request in requests:
-            audio = pb_utils.get_input_tensor_by_name(request, "audio")
-            audio = audio.as_numpy().flatten().astype(np.float32)
-
-            # Normalize
-            if np.abs(audio).max() > 1.0:
-                audio = audio / 32768.0
-
-            with torch.no_grad():
-                text = self._transcribe(audio)
-
-            output = pb_utils.Tensor("transcription", np.array([text], dtype=object))
-            responses.append(pb_utils.InferenceResponse([output]))
-
-        return responses
-
-    def _compute_features(self, audio):
-        """Compute mel spectrogram features."""
-        import torch
-        import torch.nn.functional as F
-
-        # Convert to tensor
-        audio = torch.from_numpy(audio).to(self.device)
-
-        # Parameters for mel spectrogram (Parakeet uses 128 mels)
-        n_fft = 512
-        hop_length = 160
-        n_mels = 128
-        sample_rate = 16000
-
-        # Simple STFT-based mel spectrogram
-        window = torch.hann_window(n_fft, device=self.device)
-
-        # Pad audio
-        pad_amount = n_fft // 2
-        audio = F.pad(audio, (pad_amount, pad_amount), mode='reflect')
-
-        # STFT
-        stft = torch.stft(audio, n_fft, hop_length, window=window, return_complex=True)
-        magnitudes = stft.abs() ** 2
-
-        # Mel filterbank
-        mel_basis = self._mel_filterbank(sample_rate, n_fft, n_mels).to(self.device)
-        mel_spec = torch.matmul(mel_basis, magnitudes)
-
-        # Log mel
-        mel_spec = torch.log(mel_spec.clamp(min=1e-5))
-
-        # Shape: (n_mels, time) -> (batch, n_mels, time)
-        return mel_spec.unsqueeze(0)
-
     def _mel_filterbank(self, sr, n_fft, n_mels):
         """Create mel filterbank matrix."""
         import torch
 
         f_min, f_max = 0.0, sr / 2.0
 
-        # Mel scale conversion
         def hz_to_mel(f):
             return 2595.0 * np.log10(1.0 + f / 700.0)
 
@@ -206,90 +103,186 @@ class TritonPythonModel:
 
         return torch.from_numpy(filterbank.astype(np.float32))
 
-    def _transcribe(self, audio):
-        """Transcribe audio to text using TensorRT."""
+    def _compute_features(self, audio):
+        """Compute mel spectrogram features."""
+        import torch
+        import torch.nn.functional as F
+
+        # Convert to tensor
+        if not isinstance(audio, torch.Tensor):
+            audio = torch.from_numpy(audio)
+        audio = audio.to(self.device).to(torch.float32)
+
+        # Pad audio
+        pad_amount = self.n_fft // 2
+        audio = F.pad(audio, (pad_amount, pad_amount), mode='reflect')
+
+        # STFT
+        window = torch.hann_window(self.n_fft, device=self.device)
+        stft = torch.stft(audio, self.n_fft, self.hop_length, window=window, return_complex=True)
+        magnitudes = stft.abs() ** 2
+
+        # Mel spectrogram
+        mel_spec = torch.matmul(self.mel_basis.float(), magnitudes)
+        mel_spec = torch.log(mel_spec.clamp(min=1e-5))
+
+        # Shape: (n_mels, time) -> (1, n_mels, time)
+        return mel_spec.unsqueeze(0).to(self.dtype)
+
+    def execute(self, requests):
+        """Run inference using BLS to call native TRT backends."""
         import torch
 
-        try:
-            # Compute features
-            features = self._compute_features(audio)  # (1, 128, time)
+        responses = []
 
-            # Run encoder
-            encoder_inputs = {
-                "audio_signal": features.to(torch.float16 if features.dtype != torch.float16 else features.dtype),
-                "length": torch.tensor([features.shape[2]], dtype=torch.int64, device=self.device)
-            }
-            encoder_out = self.encoder.infer(encoder_inputs)
+        for request in requests:
+            audio = pb_utils.get_input_tensor_by_name(request, "audio")
+            audio = audio.as_numpy().flatten().astype(np.float32)
 
-            # Get encoder outputs - find the right key
-            enc_key = [k for k in encoder_out.keys() if 'output' in k.lower() or 'encoded' in k.lower()]
-            if enc_key:
-                encoded = encoder_out[enc_key[0]]
-            else:
-                encoded = list(encoder_out.values())[0]
+            # Normalize
+            if np.abs(audio).max() > 1.0:
+                audio = audio / 32768.0
 
-        except Exception as e:
-            pb_utils.Logger.log_error(f"Encoder error: {e}")
-            return ""
+            try:
+                text = self._transcribe_bls(audio)
+            except Exception as e:
+                pb_utils.Logger.log_error(f"Transcription error: {e}")
+                import traceback
+                traceback.print_exc()
+                text = ""
 
-        # Greedy decode
-        tokens = self._greedy_decode(encoded)
+            output = pb_utils.Tensor("transcription", np.array([text], dtype=object))
+            responses.append(pb_utils.InferenceResponse([output]))
+
+        return responses
+
+    def _transcribe_bls(self, audio):
+        """Transcribe using BLS calls to native TRT backends."""
+        import torch
+
+        # Step 1: Compute mel features (lightweight, stays in Python)
+        features = self._compute_features(audio)  # (1, 128, time)
+        seq_len = features.shape[2]
+
+        # Step 2: Call encoder via BLS (native TRT backend)
+        encoder_out, encoder_len = self._call_encoder(features, seq_len)
+
+        # Step 3: Autoregressive decoding loop (calls native TRT decoder)
+        tokens = self._greedy_decode_bls(encoder_out)
+
+        # Step 4: Convert tokens to text
         return self._tokens_to_text(tokens)
 
-    def _greedy_decode(self, encoder_out):
-        """Greedy transducer decoding with decoder_joint."""
+    def _call_encoder(self, features, seq_len):
+        """Call parakeet_encoder model via BLS."""
         import torch
 
+        # Prepare inputs for encoder
+        audio_signal = pb_utils.Tensor(
+            "audio_signal",
+            features.cpu().numpy()
+        )
+        length = pb_utils.Tensor(
+            "length",
+            np.array([seq_len], dtype=np.int64)
+        )
+
+        # Create inference request for encoder
+        infer_request = pb_utils.InferenceRequest(
+            model_name="parakeet_encoder",
+            requested_output_names=["outputs", "outputs_length"],
+            inputs=[audio_signal, length]
+        )
+
+        # Execute synchronously
+        infer_response = infer_request.exec()
+
+        if infer_response.has_error():
+            raise RuntimeError(f"Encoder error: {infer_response.error().message()}")
+
+        # Get outputs
+        outputs = pb_utils.get_output_tensor_by_name(infer_response, "outputs")
+        outputs_length = pb_utils.get_output_tensor_by_name(infer_response, "outputs_length")
+
+        encoder_out = torch.from_numpy(outputs.as_numpy()).to(self.device)
+        encoder_len = outputs_length.as_numpy()[0]
+
+        return encoder_out, encoder_len
+
+    def _greedy_decode_bls(self, encoder_out):
+        """Greedy transducer decoding calling native TRT decoder."""
+        import torch
+
+        # encoder_out: (1, time, 512)
         if encoder_out.dim() == 2:
             encoder_out = encoder_out.unsqueeze(0)
 
         batch_size, num_frames, enc_dim = encoder_out.shape
         tokens = []
 
-        # Initialize decoder states (2 LSTM layers, hidden_size=640)
-        hidden_size = 640
-        state_1 = torch.zeros(2, 1, hidden_size, dtype=encoder_out.dtype, device=self.device)
-        state_2 = torch.zeros(2, 1, hidden_size, dtype=encoder_out.dtype, device=self.device)
+        # Initialize decoder states
+        state_1 = torch.zeros(2, 1, self.hidden_size, dtype=self.dtype, device=self.device)
+        state_2 = torch.zeros(2, 1, self.hidden_size, dtype=self.dtype, device=self.device)
 
         # Current target (start with blank)
-        target = torch.tensor([[self.blank_id]], dtype=torch.int64, device=self.device)
-        target_len = torch.tensor([1], dtype=torch.int64, device=self.device)
+        target = np.array([[self.blank_id]], dtype=np.int64)
+        target_len = np.array([1], dtype=np.int64)
 
         for t in range(num_frames):
-            # Get single frame (1, 1, enc_dim) -> need (1, enc_dim, 1) based on model
-            enc_frame = encoder_out[:, t:t+1, :].transpose(1, 2)  # (1, enc_dim, 1)
+            # Get single frame: (1, time, enc_dim) -> (1, enc_dim, 1)
+            enc_frame = encoder_out[:, t:t+1, :].transpose(1, 2).contiguous()
 
             for _ in range(10):  # Max symbols per frame
-                try:
-                    decoder_inputs = {
-                        "encoder_outputs": enc_frame.contiguous(),
-                        "targets": target,
-                        "target_length": target_len,
-                        "input_states_1": state_1.contiguous(),
-                        "input_states_2": state_2.contiguous(),
-                    }
+                # Call decoder via BLS
+                logits, state_1, state_2 = self._call_decoder(
+                    enc_frame, target, target_len, state_1, state_2
+                )
 
-                    outputs = self.decoder_joint.infer(decoder_inputs)
-
-                    # Get logits and states
-                    logits = outputs.get("outputs", list(outputs.values())[0])
-                    state_1 = outputs.get("output_states_1", state_1)
-                    state_2 = outputs.get("output_states_2", state_2)
-
-                    # Get token
-                    token_id = int(torch.argmax(logits.flatten()).item())
-
-                except Exception as e:
-                    pb_utils.Logger.log_error(f"Decoder error: {e}")
-                    break
+                # Get token
+                token_id = int(torch.argmax(logits.flatten()).item())
 
                 if token_id == self.blank_id:
                     break
                 else:
                     tokens.append(token_id)
-                    target = torch.tensor([[token_id]], dtype=torch.int64, device=self.device)
+                    target = np.array([[token_id]], dtype=np.int64)
 
         return tokens
+
+    def _call_decoder(self, enc_frame, target, target_len, state_1, state_2):
+        """Call parakeet_decoder model via BLS."""
+        import torch
+
+        # Prepare inputs
+        encoder_outputs = pb_utils.Tensor("encoder_outputs", enc_frame.cpu().numpy())
+        targets = pb_utils.Tensor("targets", target)
+        target_length = pb_utils.Tensor("target_length", target_len)
+        input_states_1 = pb_utils.Tensor("input_states_1", state_1.cpu().numpy())
+        input_states_2 = pb_utils.Tensor("input_states_2", state_2.cpu().numpy())
+
+        # Create inference request
+        infer_request = pb_utils.InferenceRequest(
+            model_name="parakeet_decoder",
+            requested_output_names=["outputs", "output_states_1", "output_states_2"],
+            inputs=[encoder_outputs, targets, target_length, input_states_1, input_states_2]
+        )
+
+        # Execute
+        infer_response = infer_request.exec()
+
+        if infer_response.has_error():
+            raise RuntimeError(f"Decoder error: {infer_response.error().message()}")
+
+        # Get outputs
+        outputs = pb_utils.get_output_tensor_by_name(infer_response, "outputs")
+        out_states_1 = pb_utils.get_output_tensor_by_name(infer_response, "output_states_1")
+        out_states_2 = pb_utils.get_output_tensor_by_name(infer_response, "output_states_2")
+
+        logits = torch.from_numpy(outputs.as_numpy()).to(self.device)
+        new_state_1 = torch.from_numpy(out_states_1.as_numpy()).to(self.device)
+        new_state_2 = torch.from_numpy(out_states_2.as_numpy()).to(self.device)
+
+        return logits, new_state_1, new_state_2
 
     def _tokens_to_text(self, tokens):
         """Convert tokens to text."""
@@ -304,4 +297,5 @@ class TritonPythonModel:
         return text
 
     def finalize(self):
-        pass
+        """Cleanup."""
+        pb_utils.Logger.log_info("Parakeet BLS: Finalizing")

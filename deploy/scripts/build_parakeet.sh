@@ -2,8 +2,13 @@
 # =============================================================================
 # Build Parakeet TDT 0.6B V2 for Triton (ASR Model)
 #
-# Downloads ONNX models from HuggingFace, builds TensorRT engines for GPU
-# inference, and creates Triton model repository.
+# Architecture:
+#   parakeet_tdt (BLS Python backend - orchestrator)
+#     ├── parakeet_encoder (native tensorrt_plan backend)
+#     └── parakeet_decoder (native tensorrt_plan backend)
+#
+# Downloads ONNX models from HuggingFace, builds TensorRT engines,
+# and creates Triton model repository with native TRT backends.
 #
 # Usage:
 #   ./build_parakeet.sh [START_STAGE] [STOP_STAGE]
@@ -26,7 +31,6 @@ source "${SCRIPT_DIR}/common.sh"
 # =============================================================================
 # Configuration (from config.yaml, env vars override)
 # =============================================================================
-readonly MODEL_NAME="parakeet_tdt"
 HF_REPO="${HF_REPO:-$(cfg_get 'parakeet.hf_repo' 'istupakov/parakeet-tdt-0.6b-v2-onnx')}"
 
 # TRT build settings
@@ -42,8 +46,11 @@ ENCODER_MAX_SHAPES="$(cfg_get 'parakeet.shapes.encoder.max' 'audio_signal:1x128x
 readonly DEPLOY_DIR="$(get_deploy_dir)"
 readonly WORK_DIR="${DEPLOY_DIR}/parakeet_build"
 readonly ONNX_DIR="${WORK_DIR}/onnx"
-readonly MODEL_DIR="${DEPLOY_DIR}/model_repository/asr/${MODEL_NAME}"
-readonly ENGINE_DIR="${MODEL_DIR}/1/engines"
+
+# Model directories for native TRT backends
+readonly ENCODER_DIR="${DEPLOY_DIR}/model_repository/asr/parakeet_encoder"
+readonly DECODER_DIR="${DEPLOY_DIR}/model_repository/asr/parakeet_decoder"
+readonly BLS_DIR="${DEPLOY_DIR}/model_repository/asr/parakeet_tdt"
 
 # =============================================================================
 # Cleanup Handler
@@ -57,12 +64,15 @@ if [[ "${1:-}" == "cleanup" || "${1:-}" == "clean" ]]; then
         --all|-a)
             log_warn "Removing all build artifacts..."
             rm -rf "$WORK_DIR"
-            rm -rf "$MODEL_DIR"
+            rm -f "${ENCODER_DIR}/1/model.plan"
+            rm -f "${DECODER_DIR}/1/model.plan"
+            rm -f "${BLS_DIR}/1/vocab.txt"
             log_info "Cleanup complete"
             ;;
         --engines|-e)
             log_info "Removing TRT engines only..."
-            rm -rf "$ENGINE_DIR"
+            rm -f "${ENCODER_DIR}/1/model.plan"
+            rm -f "${DECODER_DIR}/1/model.plan"
             log_info "Engines removed"
             ;;
         *)
@@ -83,6 +93,7 @@ STOP_STAGE="${2:-2}"
 echo "=============================================="
 echo "Building Parakeet TDT 0.6B V2"
 echo "=============================================="
+echo "Architecture: BLS + Native TensorRT Backends"
 echo "Stages: ${START_STAGE} to ${STOP_STAGE}"
 echo ""
 
@@ -126,7 +137,7 @@ stage_download_models() {
 # =============================================================================
 
 stage_build_trt_engines() {
-    log_step "Stage 1: Building TensorRT engines..."
+    log_step "Stage 1: Building TensorRT engines for native backends..."
 
     # Verify ONNX models exist
     if [[ ! -f "${ONNX_DIR}/encoder-model.onnx" ]]; then
@@ -134,111 +145,97 @@ stage_build_trt_engines() {
         return 1
     fi
 
-    mkdir -p "$ENGINE_DIR"
+    mkdir -p "${ENCODER_DIR}/1"
+    mkdir -p "${DECODER_DIR}/1"
 
     # Determine precision flag
     local precision_flag="--fp16"
     [[ "$TRT_PRECISION" == "fp32" ]] && precision_flag="--fp32"
 
-    # Build encoder (audio features input: batch x time x features)
-    # Parakeet encoder expects preprocessed mel features
-    log_info "Building encoder engine..."
-    build_trt_engine \
-        "${ONNX_DIR}/encoder-model.onnx" \
-        "${ENGINE_DIR}/encoder.engine" \
-        "$precision_flag" \
-        "--minShapes=${ENCODER_MIN_SHAPES}" \
-        "--optShapes=${ENCODER_OPT_SHAPES}" \
-        "--maxShapes=${ENCODER_MAX_SHAPES}"
+    # Build encoder engine -> parakeet_encoder/1/model.plan
+    log_info "Building encoder engine (native TRT backend)..."
+    if [[ ! -f "${ENCODER_DIR}/1/model.plan" ]]; then
+        build_trt_engine \
+            "${ONNX_DIR}/encoder-model.onnx" \
+            "${ENCODER_DIR}/1/model.plan" \
+            "$precision_flag" \
+            "--minShapes=${ENCODER_MIN_SHAPES}" \
+            "--optShapes=${ENCODER_OPT_SHAPES}" \
+            "--maxShapes=${ENCODER_MAX_SHAPES}"
+    else
+        log_info "Encoder engine already exists"
+    fi
 
-    # Build decoder_joint (combined decoder and joiner)
-    # Note: decoder_joint has mostly fixed shapes for autoregressive decoding
-    log_info "Building decoder_joint engine..."
-    build_trt_engine \
-        "${ONNX_DIR}/decoder_joint-model.onnx" \
-        "${ENGINE_DIR}/decoder_joint.engine" \
-        "$precision_flag"
+    # Build decoder_joint engine -> parakeet_decoder/1/model.plan
+    log_info "Building decoder_joint engine (native TRT backend)..."
+    if [[ ! -f "${DECODER_DIR}/1/model.plan" ]]; then
+        build_trt_engine \
+            "${ONNX_DIR}/decoder_joint-model.onnx" \
+            "${DECODER_DIR}/1/model.plan" \
+            "$precision_flag"
+    else
+        log_info "Decoder engine already exists"
+    fi
 
-    log_info "TRT engines built at: $ENGINE_DIR"
+    log_info "TRT engines built for native backends"
 }
 
 # =============================================================================
-# Stage 2: Create Model Repository
+# Stage 2: Setup Model Repository
 # =============================================================================
 
-stage_create_model_repo() {
-    log_step "Stage 2: Creating Triton model repository..."
+stage_setup_model_repo() {
+    log_step "Stage 2: Setting up Triton model repository..."
 
     if [[ ! -d "$ONNX_DIR" ]]; then
         log_error "ONNX models not found. Run stage 0 first."
         return 1
     fi
 
-    mkdir -p "${MODEL_DIR}/1"
+    # Copy vocab to BLS model
+    mkdir -p "${BLS_DIR}/1"
+    cp "${ONNX_DIR}/vocab.txt" "${BLS_DIR}/1/"
+    log_info "Copied vocab.txt to BLS model"
 
-    # Copy ONNX files (as fallback and for reference)
-    log_info "Copying ONNX files..."
-    cp "${ONNX_DIR}/encoder-model.onnx" "${MODEL_DIR}/1/"
-    cp "${ONNX_DIR}/encoder-model.onnx.data" "${MODEL_DIR}/1/"
-    cp "${ONNX_DIR}/decoder_joint-model.onnx" "${MODEL_DIR}/1/"
+    # Verify all components
+    log_info "Verifying model repository..."
 
-    # Copy vocab and preprocessor
-    cp "${ONNX_DIR}/vocab.txt" "${MODEL_DIR}/1/"
-    [[ -f "${ONNX_DIR}/nemo128.onnx" ]] && cp "${ONNX_DIR}/nemo128.onnx" "${MODEL_DIR}/1/"
+    local errors=0
 
-    log_info "Model files copied successfully"
-}
+    if [[ -f "${ENCODER_DIR}/1/model.plan" ]]; then
+        log_info "  ✓ parakeet_encoder/1/model.plan"
+    else
+        log_error "  ✗ parakeet_encoder/1/model.plan MISSING"
+        ((errors++))
+    fi
 
-create_triton_config() {
-    log_info "Creating Triton configuration..."
+    if [[ -f "${DECODER_DIR}/1/model.plan" ]]; then
+        log_info "  ✓ parakeet_decoder/1/model.plan"
+    else
+        log_error "  ✗ parakeet_decoder/1/model.plan MISSING"
+        ((errors++))
+    fi
 
-    cat > "${MODEL_DIR}/config.pbtxt" << EOF
-# Parakeet TDT 0.6B V2 - Automatic Speech Recognition
-# Uses TensorRT engines for GPU inference with Python backend
+    if [[ -f "${BLS_DIR}/1/model.py" ]]; then
+        log_info "  ✓ parakeet_tdt/1/model.py (BLS)"
+    else
+        log_error "  ✗ parakeet_tdt/1/model.py MISSING"
+        ((errors++))
+    fi
 
-name: "parakeet_tdt"
-backend: "python"
-max_batch_size: ${MAX_BATCH_SIZE}
+    if [[ -f "${BLS_DIR}/1/vocab.txt" ]]; then
+        log_info "  ✓ parakeet_tdt/1/vocab.txt"
+    else
+        log_error "  ✗ parakeet_tdt/1/vocab.txt MISSING"
+        ((errors++))
+    fi
 
-input [
-  {
-    name: "audio"
-    data_type: TYPE_FP32
-    dims: [ -1 ]
-  },
-  {
-    name: "audio_length"
-    data_type: TYPE_INT64
-    dims: [ 1 ]
-    optional: true
-  }
-]
+    if [[ $errors -gt 0 ]]; then
+        log_error "Model repository incomplete!"
+        return 1
+    fi
 
-output [
-  {
-    name: "transcription"
-    data_type: TYPE_STRING
-    dims: [ 1 ]
-  }
-]
-
-instance_group [
-  {
-    count: 1
-    kind: KIND_GPU
-    gpus: [ 0 ]
-  }
-]
-
-parameters {
-  key: "model_type"
-  value: { string_value: "transducer" }
-}
-
-version_policy: { latest: { num_versions: 1 } }
-EOF
-
-    log_info "Created: ${MODEL_DIR}/config.pbtxt"
+    log_info "Model repository ready"
 }
 
 show_summary() {
@@ -247,21 +244,23 @@ show_summary() {
     echo -e "${GREEN}Parakeet TDT Build Complete${NC}"
     echo "=============================================="
     echo ""
-    echo "Model location: ${MODEL_DIR}"
+    echo "Architecture: BLS + Native TensorRT Backends"
     echo ""
-    echo "Contents:"
-    ls -la "${MODEL_DIR}/1/" 2>/dev/null || echo "  (run all stages to build)"
+    echo "Models:"
+    echo "  parakeet_encoder (tensorrt_plan):"
+    ls -lh "${ENCODER_DIR}/1/model.plan" 2>/dev/null || echo "    (not built)"
     echo ""
-    if [[ -d "$ENGINE_DIR" ]]; then
-        echo "TRT Engines:"
-        ls -lh "${ENGINE_DIR}"/*.engine 2>/dev/null || echo "  (none)"
-        echo ""
-    fi
-    echo "To start Triton:"
+    echo "  parakeet_decoder (tensorrt_plan):"
+    ls -lh "${DECODER_DIR}/1/model.plan" 2>/dev/null || echo "    (not built)"
+    echo ""
+    echo "  parakeet_tdt (BLS orchestrator):"
+    ls -l "${BLS_DIR}/1/model.py" 2>/dev/null || echo "    (not found)"
+    echo ""
+    echo "To start Triton (load all 3 models):"
     echo "  docker compose up -d triton"
     echo ""
     echo "Cleanup options:"
-    echo "  $0 cleanup            # Remove downloads, keep model"
+    echo "  $0 cleanup            # Remove downloads, keep engines"
     echo "  $0 cleanup --all      # Remove everything"
     echo "  $0 cleanup --engines  # Rebuild TRT engines only"
 }
@@ -280,14 +279,12 @@ main() {
         stage_build_trt_engines
     fi
 
-    # Stage 2: Create model repo
+    # Stage 2: Setup model repo
     if [[ $START_STAGE -le 2 && $STOP_STAGE -ge 2 ]]; then
-        stage_create_model_repo
-        create_triton_config
+        stage_setup_model_repo
     fi
 
     show_summary
 }
 
 main
-

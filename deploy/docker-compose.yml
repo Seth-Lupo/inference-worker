@@ -8,7 +8,7 @@ version: "3.8"
 #   - LLM: Qwen3-4B-AWQ (vLLM backend) - chat/reasoning
 #   - LLM: T3 Turbo (vLLM backend) - speech token generation
 #   - TTS: Chatterbox (Python backend) - calls T3 via gRPC, runs S3Gen locally
-#   - ASR: Parakeet (Python backend) - TensorRT
+#   - ASR: Parakeet (BLS + native TensorRT backends)
 # - Worker (Port 80): WebSocket server
 #
 # T3 runs as a native vLLM backend model (not wrapped in Python).
@@ -87,6 +87,8 @@ services:
       --load-model=qwen3
       --load-model=t3
       --load-model=chatterbox
+      --load-model=parakeet_encoder
+      --load-model=parakeet_decoder
       --load-model=parakeet_tdt
       --disable-auto-complete-config
       --http-port=8000
