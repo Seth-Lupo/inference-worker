@@ -111,29 +111,35 @@ mkdir -p "$WORK_DIR"
 download_t3() {
     log_step "Downloading T3 model for vLLM backend..."
 
-    mkdir -p "$T3_WEIGHTS_DIR"
-
     # Check if already downloaded
     if is_real_file "${T3_WEIGHTS_DIR}/t3_cfg.safetensors" 100000000; then
         log_info "T3 weights already downloaded"
     else
-        # Download T3 weights and tokenizer
-        log_info "Downloading T3 weights from ${HF_REPO_MAIN}..."
-        hf_download "$HF_REPO_MAIN" "$T3_WEIGHTS_DIR" \
-            "t3_cfg.safetensors" \
-            "tokenizer.json" || {
-            log_error "Failed to download T3 weights"
+        # Clone main chatterbox repo (has weights + code)
+        log_info "Cloning ${HF_REPO_MAIN} with LFS..."
+        hf_clone "$HF_REPO_MAIN" "${WORK_DIR}/chatterbox" || {
+            log_error "Failed to clone from HuggingFace"
             return 1
         }
+
+        # Copy T3 files to weights directory
+        mkdir -p "$T3_WEIGHTS_DIR"
+        cp "${WORK_DIR}/chatterbox/t3_cfg.safetensors" "$T3_WEIGHTS_DIR/" 2>/dev/null || true
+        cp "${WORK_DIR}/chatterbox/tokenizer.json" "$T3_WEIGHTS_DIR/" 2>/dev/null || true
+
+        # Copy model code files if present
+        for file in config.json modeling_t3.py configuration_t3.py entokenizer.py; do
+            cp "${WORK_DIR}/chatterbox/${file}" "$T3_WEIGHTS_DIR/" 2>/dev/null || true
+        done
     fi
 
     # Create model.safetensors symlink for vLLM
-    if [[ ! -e "${T3_WEIGHTS_DIR}/model.safetensors" ]]; then
+    if [[ -f "${T3_WEIGHTS_DIR}/t3_cfg.safetensors" ]] && [[ ! -e "${T3_WEIGHTS_DIR}/model.safetensors" ]]; then
         ln -sf "t3_cfg.safetensors" "${T3_WEIGHTS_DIR}/model.safetensors"
         log_info "Created symlink: model.safetensors -> t3_cfg.safetensors"
     fi
 
-    # Download T3 model code files (required for vLLM with trust_remote_code)
+    # If model code files missing, try chatterbox-turbo repo
     local code_files=("config.json" "modeling_t3.py" "configuration_t3.py" "entokenizer.py")
     local missing_code=false
 
@@ -145,14 +151,14 @@ download_t3() {
     done
 
     if [[ "$missing_code" == "true" ]]; then
-        log_info "Downloading T3 model code files..."
-        # Try to download from chatterbox-turbo repo (has the model code)
-        hf_download "ResembleAI/chatterbox-turbo" "$T3_WEIGHTS_DIR" \
-            "${code_files[@]}" 2>/dev/null || {
-            log_warn "Could not download from chatterbox-turbo, trying main repo..."
-            hf_download "$HF_REPO_MAIN" "$T3_WEIGHTS_DIR" \
-                "${code_files[@]}" 2>/dev/null || true
-        }
+        log_info "Downloading T3 model code from chatterbox-turbo..."
+        hf_clone "ResembleAI/chatterbox-turbo" "${WORK_DIR}/chatterbox-turbo" 2>/dev/null || true
+
+        for file in "${code_files[@]}"; do
+            if [[ ! -f "${T3_WEIGHTS_DIR}/${file}" ]] && [[ -f "${WORK_DIR}/chatterbox-turbo/${file}" ]]; then
+                cp "${WORK_DIR}/chatterbox-turbo/${file}" "$T3_WEIGHTS_DIR/"
+            fi
+        done
     fi
 
     # Create tokenizer_config.json for vLLM
@@ -204,22 +210,58 @@ download_assets() {
 
     local files=("s3gen.safetensors" "ve.safetensors" "conds.pt")
 
+    # Check if already downloaded
+    local all_exist=true
     for file in "${files[@]}"; do
-        if is_real_file "${ASSETS_DIR}/${file}" 1000000; then
-            log_info "  ✓ ${file} (already downloaded)"
-        else
-            log_info "  Downloading ${file}..."
-            hf_download "$HF_REPO_MAIN" "$ASSETS_DIR" "$file" || {
-                log_error "Failed to download ${file}"
+        if ! is_real_file "${ASSETS_DIR}/${file}" 1000000; then
+            all_exist=false
+            break
+        fi
+    done
+
+    if [[ "$all_exist" == "true" ]]; then
+        log_info "Assets already downloaded"
+    else
+        # Clone repo if not already cloned by download_t3
+        if [[ ! -d "${WORK_DIR}/chatterbox/.git" ]]; then
+            log_info "Cloning ${HF_REPO_MAIN} with LFS..."
+            hf_clone "$HF_REPO_MAIN" "${WORK_DIR}/chatterbox" || {
+                log_error "Failed to clone from HuggingFace"
                 return 1
             }
         fi
-    done
+
+        # Copy asset files
+        for file in "${files[@]}"; do
+            if [[ -f "${WORK_DIR}/chatterbox/${file}" ]]; then
+                cp "${WORK_DIR}/chatterbox/${file}" "$ASSETS_DIR/"
+                log_info "  ✓ ${file}"
+            else
+                log_warn "  ✗ ${file} not found in repo"
+            fi
+        done
+    fi
 
     # Copy tokenizer to assets (Python backend needs it too)
     if [[ -f "${T3_WEIGHTS_DIR}/tokenizer.json" ]] && [[ ! -f "${ASSETS_DIR}/tokenizer.json" ]]; then
         cp "${T3_WEIGHTS_DIR}/tokenizer.json" "${ASSETS_DIR}/"
         log_info "Copied tokenizer.json to assets"
+    fi
+
+    # Verify
+    local missing=0
+    for file in "${files[@]}"; do
+        if is_real_file "${ASSETS_DIR}/${file}" 1000000; then
+            log_info "  ✓ ${file}"
+        else
+            log_warn "  ✗ ${file} MISSING"
+            ((missing++))
+        fi
+    done
+
+    if [[ $missing -gt 0 ]]; then
+        log_error "Missing ${missing} asset files"
+        return 1
     fi
 
     log_info "Assets ready at: ${ASSETS_DIR}"

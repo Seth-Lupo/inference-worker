@@ -67,51 +67,68 @@ vllm:
   api_key: ""  # Optional, leave empty for no auth
 
 # -----------------------------------------------------------------------------
-# TTS: Chatterbox Turbo (350M, TensorRT + ONNX Runtime)
+# TTS: Chatterbox with T3 vLLM + S3Gen PyTorch
 # -----------------------------------------------------------------------------
 # Architecture:
-# - embed_tokens: TensorRT (simple embedding layer)
-# - language_model: ONNX Runtime (complex KV cache operations)
-# - speech_encoder: ONNX Runtime (STFT custom op - not TRT compatible)
-# - conditional_decoder: ONNX Runtime (MultiHeadAttention custom op)
+#   - T3: vLLM backend (text + conditioning → speech tokens)
+#   - S3Gen: PyTorch (speech tokens → audio via flow matching + HiFiGAN)
+#   - VoiceEncoder: PyTorch (reference audio → speaker embedding)
+#   - Vocoder: Optional TensorRT for HiFiGAN acceleration
 # -----------------------------------------------------------------------------
 chatterbox:
-  # Model source (ONNX exports from HuggingFace)
-  hf_repo: "ResembleAI/chatterbox-turbo-ONNX"
+  # HuggingFace repos
+  hf_repo: "ResembleAI/chatterbox"           # Main repo (weights)
+  hf_repo_onnx: "ResembleAI/chatterbox-turbo-ONNX"  # ONNX for TRT builds
 
-  # Precision for models: fp16 or fp32
+  # Precision
   precision: "fp16"
 
-  # Native sample rate
+  # Audio settings
   sample_rate: 24000
-
-  # Triton settings
-  max_batch_size: 8
-  max_concurrent: 4     # KV cache slots for concurrent generation
-  decoupled_mode: true  # Enable streaming
-
-  # Generation parameters
-  temperature: 0.8
-  top_p: 0.95
-  top_k: 50
-  repetition_penalty: 1.2
-  token_chunk_size: 25  # Tokens per audio chunk (~1 second)
 
   # Triton paths (inside container)
   assets_path: "/models/tts/chatterbox_assets"
+  t3_weights_path: "/models/t3_weights"
 
-  # Model-specific backends
-  # TensorRT: embed_tokens (simple ops)
-  # ONNX Runtime: everything else (custom ops not supported by TRT)
-  backends:
-    embed_tokens: "tensorrt"      # Simple embedding - TRT works
-    language_model: "onnxruntime" # Complex KV cache - keep as ONNX
-    speech_encoder: "onnxruntime" # STFT op not supported by TRT
-    conditional_decoder: "onnxruntime" # MultiHeadAttention not supported
+# -----------------------------------------------------------------------------
+# T3: Speech Token Generator (vLLM Backend)
+# -----------------------------------------------------------------------------
+t3:
+  # vLLM settings
+  gpu_memory_utilization: 0.3
+  max_model_len: 2048
+  dtype: "float16"
+  trust_remote_code: true
+  enforce_eager: true  # Disable CUDA graphs for custom model
 
-  # Dynamic shapes for TensorRT engine builds
-  shapes:
-    embed_tokens:
-      min: "input_ids:1x1"
-      opt: "input_ids:4x256"
-      max: "input_ids:8x1024"
+# -----------------------------------------------------------------------------
+# S3Gen: Flow Matching Decoder + Vocoder
+# -----------------------------------------------------------------------------
+s3gen:
+  # Flow matching (diffusion) settings
+  # Fixed steps for TensorRT, or variable for PyTorch
+  diffusion_steps: 4          # Fixed steps (for TRT unrolled engine)
+  diffusion_steps_trt: 4      # Steps baked into TRT engine
+
+  # Progressive streaming (PyTorch only - variable steps per chunk)
+  # First chunks use fewer steps for lower latency
+  progressive_chunks: [4, 8, 16, 32, 32]    # Tokens per chunk
+  progressive_steps: [1, 2, 5, 7, 10]       # Diffusion steps per chunk
+
+  # Vocoder backend: "trt" or "pytorch"
+  # TRT is faster but requires building the engine
+  vocoder_backend: "trt"
+
+  # TensorRT vocoder shapes (for conditional_decoder)
+  vocoder_shapes:
+    min: "speech_tokens:1x4"
+    opt: "speech_tokens:1x32"
+    max: "speech_tokens:1x64"
+
+  # Flow decoder TRT (optional - unrolled N steps)
+  # Set to true to build TRT engine with fixed diffusion_steps_trt
+  flow_decoder_trt: false     # Not yet implemented
+  flow_decoder_shapes:
+    min: "latents:1x256x16"
+    opt: "latents:1x256x64"
+    max: "latents:1x256x128"
