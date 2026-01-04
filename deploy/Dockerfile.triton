@@ -28,21 +28,27 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Install Triton client for BLS (Python backend calling other Triton models)
 RUN pip install --no-cache-dir tritonclient[grpc]
 
-# Install audio processing libraries (not in base image)
-# librosa replaces torchaudio for resampling
-RUN pip install --no-cache-dir \
+# CRITICAL: Get the exact torch version from the base image BEFORE any pip installs
+# This prevents any package from accidentally upgrading/downgrading torch and breaking vLLM ABI
+RUN TORCH_VERSION=$(python3 -c "import torch; print(torch.__version__.split('+')[0])") && \
+    echo "Base image torch version: $TORCH_VERSION" && \
+    pip install --no-cache-dir \
+        "torch==$TORCH_VERSION" \
         librosa \
         soundfile \
         scipy
 
-# Install torchvision (required by diffusers -> transformers CLIP)
-# CRITICAL: Use --no-deps to avoid pulling incompatible PyTorch that breaks vLLM ABI
+# Install torchvision matching the base torch version
+# Use --no-deps to avoid pulling any additional torch dependencies
 RUN pip install --no-cache-dir --no-deps torchvision
 
 # Install S3Gen/Chatterbox dependencies (not in base image)
 # diffusers 0.27+ avoids cached_download deprecation in new huggingface_hub
 # Note: transformers, huggingface_hub, tokenizers, safetensors already in base via vLLM
-RUN pip install --no-cache-dir \
+# Use pip constraint to prevent torch version changes
+RUN TORCH_VERSION=$(python3 -c "import torch; print(torch.__version__.split('+')[0])") && \
+    pip install --no-cache-dir \
+        "torch==$TORCH_VERSION" \
         omegaconf \
         einops \
         "diffusers>=0.27.0,<0.30.0" \
