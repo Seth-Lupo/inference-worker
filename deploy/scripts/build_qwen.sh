@@ -20,17 +20,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/common.sh"
 
 # =============================================================================
-# Configuration
+# Configuration (from config.yaml, env vars override)
 # =============================================================================
 readonly MODEL_NAME="qwen3"
 
-# Model repository - Qwen3 4B AWQ quantized
-HF_REPO="${HF_REPO:-Qwen/Qwen3-4B-Instruct-AWQ}"
-
-# Alternative models (can override via environment):
-# - Qwen/Qwen3-4B-Instruct (fp16, larger)
-# - Qwen/Qwen3-1.7B-Instruct-AWQ (smaller, faster)
-# - Qwen/Qwen3-8B-Instruct-AWQ (larger, smarter)
+# Load from config.yaml (env vars take precedence)
+HF_REPO="${HF_REPO:-$(cfg_get 'vllm.model' 'Qwen/Qwen3-4B-Instruct-AWQ')}"
+QUANTIZATION="${QUANTIZATION:-$(cfg_get 'vllm.quantization' 'awq')}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-$(cfg_get 'vllm.max_model_len' '8192')}"
+GPU_MEMORY_UTIL="${GPU_MEMORY_UTIL:-$(cfg_get 'vllm.gpu_memory_utilization' '0.85')}"
+TENSOR_PARALLEL="${TENSOR_PARALLEL:-$(cfg_get 'vllm.tensor_parallel_size' '1')}"
+ENABLE_PREFIX_CACHING="${ENABLE_PREFIX_CACHING:-$(cfg_get 'vllm.enable_prefix_caching' 'true')}"
 
 # Paths
 readonly DEPLOY_DIR="$(get_deploy_dir)"
@@ -68,8 +68,11 @@ fi
 # =============================================================================
 log_step "Building Qwen3 LLM for vLLM backend"
 echo ""
-log_info "Model: ${HF_REPO}"
-log_info "Weights: ${WEIGHTS_DIR}"
+log_info "Model:        ${HF_REPO}"
+log_info "Quantization: ${QUANTIZATION}"
+log_info "Max Length:   ${MAX_MODEL_LEN}"
+log_info "GPU Memory:   ${GPU_MEMORY_UTIL}"
+log_info "Weights:      ${WEIGHTS_DIR}"
 echo ""
 
 # Ensure model directory exists
@@ -112,11 +115,12 @@ cat > "${MODEL_DIR}/1/model.json" << EOF
 {
     "model": "${CONTAINER_WEIGHTS_PATH}",
     "disable_log_requests": true,
-    "gpu_memory_utilization": 0.85,
-    "max_model_len": 8192,
-    "tensor_parallel_size": 1,
+    "gpu_memory_utilization": ${GPU_MEMORY_UTIL},
+    "max_model_len": ${MAX_MODEL_LEN},
+    "tensor_parallel_size": ${TENSOR_PARALLEL},
     "dtype": "auto",
-    "quantization": "awq",
+    "quantization": "${QUANTIZATION}",
+    "enable_prefix_caching": ${ENABLE_PREFIX_CACHING},
     "trust_remote_code": true
 }
 EOF
