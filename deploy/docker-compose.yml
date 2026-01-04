@@ -51,7 +51,9 @@ services:
       - ./model_repository/asr:/models/asr
       # T3 weights (downloaded by build script, used by vLLM backend)
       - ./models/t3_weights:/models/t3_weights:ro
-      # HuggingFace cache for Qwen3 download
+      # Qwen3 weights (downloaded by build script, used by vLLM backend)
+      - ./models/qwen3_weights:/models/qwen3_weights:ro
+      # HuggingFace cache (fallback)
       - ${HF_HOME:-~/.cache/huggingface}:/root/.cache/huggingface
       # Logs
       - ./logs/triton:/var/log/triton

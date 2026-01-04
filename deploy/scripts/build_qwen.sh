@@ -38,8 +38,8 @@ readonly MODEL_REPO="${DEPLOY_DIR}/model_repository/llm"
 readonly MODEL_DIR="${MODEL_REPO}/${MODEL_NAME}"
 readonly WEIGHTS_DIR="${DEPLOY_DIR}/models/qwen3_weights"
 
-# HuggingFace cache (used by vLLM at runtime)
-HF_CACHE="${HF_HOME:-${HOME}/.cache/huggingface}"
+# Container path (mounted in docker-compose.yml)
+readonly CONTAINER_WEIGHTS_PATH="/models/qwen3_weights"
 
 # =============================================================================
 # Cleanup Handler
@@ -86,28 +86,22 @@ mkdir -p "$WEIGHTS_DIR"
 # =============================================================================
 log_step "Downloading Qwen3 model weights..."
 
-# Check if already downloaded (look for config.json as indicator)
-CACHE_MODEL_DIR="${HF_CACHE}/hub/models--${HF_REPO//\//__}"
-if [[ -d "$CACHE_MODEL_DIR" ]] && [[ -f "$CACHE_MODEL_DIR/snapshots/"*"/config.json" ]]; then
-    log_info "Model already cached: ${HF_REPO}"
+# Check if already downloaded
+if has_real_weights "$WEIGHTS_DIR" "*.safetensors"; then
+    log_info "Model already downloaded: ${WEIGHTS_DIR}"
 else
-    ensure_hf_cli || {
-        log_error "huggingface-cli required. Install with: pip install huggingface-hub"
-        exit 1
-    }
-
-    log_info "Downloading ${HF_REPO}..."
-
-    # Build args
-    HF_ARGS=()
-    [[ -n "${HF_TOKEN:-}" ]] && HF_ARGS+=("--token" "$HF_TOKEN")
-
-    # Download the full model
-    huggingface-cli download "$HF_REPO" "${HF_ARGS[@]}" || {
-        log_error "Failed to download ${HF_REPO}"
+    # Clone with LFS
+    hf_clone "$HF_REPO" "$WEIGHTS_DIR" || {
+        log_error "Failed to clone ${HF_REPO}"
         log_error "If gated, set HF_TOKEN environment variable"
         exit 1
     }
+
+    # Verify download
+    if ! has_real_weights "$WEIGHTS_DIR" "*.safetensors"; then
+        log_error "Download incomplete - no safetensors files found"
+        exit 1
+    fi
 
     log_info "Download complete"
 fi
@@ -118,9 +112,10 @@ fi
 log_step "Creating vLLM configuration..."
 
 # Create model.json for vLLM backend
+# Use container path where weights are mounted (not HF repo name)
 cat > "${MODEL_DIR}/1/model.json" << EOF
 {
-    "model": "${HF_REPO}",
+    "model": "${CONTAINER_WEIGHTS_PATH}",
     "disable_log_requests": true,
     "gpu_memory_utilization": 0.85,
     "max_model_len": 8192,
@@ -171,8 +166,10 @@ echo "=============================================="
 log_info "Qwen3 build complete!"
 echo "=============================================="
 echo ""
-echo "Model: ${HF_REPO}"
-echo "Config: ${MODEL_DIR}/1/model.json"
+echo "Model:   ${HF_REPO}"
+echo "Weights: ${WEIGHTS_DIR}"
+echo "Config:  ${MODEL_DIR}/1/model.json"
+echo "Mount:   ${CONTAINER_WEIGHTS_PATH} (in container)"
 echo ""
 echo "To start Triton with Qwen3:"
 echo "  docker compose up -d triton"
