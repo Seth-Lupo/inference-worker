@@ -86,8 +86,8 @@ services:
       --model-repository=/models/asr
       --model-control-mode=explicit
       --model-load-thread-count=1
-      --load-model=parakeet_decoder
       --load-model=parakeet_encoder
+      --load-model=parakeet_decoder
       --load-model=parakeet_tdt
       --load-model=chatterbox_s3gen
       --load-model=chatterbox_voice_encoder
