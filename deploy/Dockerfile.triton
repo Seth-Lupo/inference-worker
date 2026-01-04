@@ -57,15 +57,19 @@ RUN pip install --no-cache-dir --constraint /tmp/frozen-packages.txt \
         soundfile \
         scipy
 
+# Pin transformers to avoid aimv2 conflict with s3tokenizer
+# s3tokenizer registers model_type="aimv2", but transformers 4.48+ has built-in aimv2
+RUN pip install --no-cache-dir --constraint /tmp/frozen-packages.txt \
+        "transformers>=4.45.0,<4.48.0"
+
 # Install S3Gen/Chatterbox dependencies (not in base image)
 # diffusers 0.27+ avoids cached_download deprecation in new huggingface_hub
-# Note: transformers, huggingface_hub, tokenizers, safetensors already in base via vLLM
 RUN pip install --no-cache-dir --constraint /tmp/frozen-packages.txt \
         omegaconf \
         einops \
         "diffusers>=0.27.0,<0.30.0" \
         conformer \
-        s3tokenizer
+        "s3tokenizer>=0.3.0"
 
 # Remove xformers if installed (causes triton kernel issues)
 RUN pip uninstall -y xformers || true
@@ -81,4 +85,5 @@ RUN echo "=== Installed versions ===" && \
     python3 -c "import transformers; print(f'transformers: {transformers.__version__}')" && \
     python3 -c "import vllm; print(f'vLLM: {vllm.__version__}')" && \
     python3 -c "import compressed_tensors; print(f'compressed-tensors: {compressed_tensors.__version__}')" && \
+    python3 -c "import s3tokenizer; print('s3tokenizer: OK')" && \
     ls -la /opt/tritonserver/backends/vllm/
