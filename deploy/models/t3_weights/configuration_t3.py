@@ -66,6 +66,10 @@ class T3Config(PretrainedConfig):
         self.conditioning_size = conditioning_size
         self.conditioning_path = conditioning_path
 
+        # Remove token IDs from kwargs if present to avoid duplicate argument error
+        kwargs.pop("bos_token_id", None)
+        kwargs.pop("eos_token_id", None)
+
         super().__init__(
             tie_word_embeddings=tie_word_embeddings,
             bos_token_id=start_speech_token,

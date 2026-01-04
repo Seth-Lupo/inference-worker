@@ -34,12 +34,12 @@ class TritonPythonModel:
             raise FileNotFoundError(f"ONNX model not found: {onnx_path}")
 
         # Create ONNX Runtime session with CUDA EP
+        # Use small memory limit to coexist with vLLM
         providers = [
             ('CUDAExecutionProvider', {
                 'device_id': 0,
-                'arena_extend_strategy': 'kNextPowerOfTwo',
-                'gpu_mem_limit': 2 * 1024 * 1024 * 1024,  # 2GB
-                'cudnn_conv_algo_search': 'EXHAUSTIVE',
+                'arena_extend_strategy': 'kSameAsRequested',
+                'gpu_mem_limit': 512 * 1024 * 1024,  # 512MB
             }),
             'CPUExecutionProvider'
         ]
