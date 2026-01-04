@@ -149,7 +149,7 @@ has_real_weights() {
 }
 
 # =============================================================================
-# Git LFS Utilities
+# HuggingFace Download Utilities
 # =============================================================================
 
 # Ensure git-lfs is installed
@@ -173,30 +173,170 @@ ensure_git_lfs() {
     git lfs install
 }
 
-# Clone a HuggingFace repo with LFS support
-# Usage: hf_clone "org/model" "output_dir" [hf_token]
+# Ensure huggingface-cli is installed
+ensure_hf_cli() {
+    if command -v huggingface-cli &>/dev/null; then
+        return 0
+    fi
+
+    log_info "Installing huggingface-hub..."
+    pip install -q huggingface-hub || {
+        log_error "Failed to install huggingface-hub"
+        return 1
+    }
+}
+
+# Build authenticated HuggingFace URL
+# Usage: hf_url "org/model" -> https://huggingface.co/org/model (or with token)
+hf_url() {
+    local repo="$1"
+    local token="${HF_TOKEN:-}"
+
+    if [[ -n "$token" ]]; then
+        echo "https://USER:${token}@huggingface.co/${repo}"
+    else
+        echo "https://huggingface.co/${repo}"
+    fi
+}
+
+# Clone a HuggingFace repo with full LFS download
+# Usage: hf_clone "org/model" "output_dir"
 hf_clone() {
     local repo="$1"
     local output_dir="$2"
-    local token="${3:-${HF_TOKEN:-}}"
 
     ensure_git_lfs || return 1
 
-    local git_url
-    if [[ -n "$token" ]]; then
-        git_url="https://USER:${token}@huggingface.co/${repo}"
-    else
-        git_url="https://huggingface.co/${repo}"
+    # Remove existing directory if it's incomplete
+    if [[ -d "$output_dir" && ! -d "$output_dir/.git" ]]; then
+        rm -rf "$output_dir"
     fi
 
-    log_info "Cloning ${repo}..."
-    GIT_LFS_SKIP_SMUDGE=0 git clone --depth 1 "$git_url" "$output_dir"
+    if [[ -d "$output_dir/.git" ]]; then
+        log_info "Repository already cloned: $output_dir"
+        # Ensure LFS files are pulled
+        (cd "$output_dir" && git lfs pull)
+        return 0
+    fi
+
+    log_info "Cloning ${repo} (with LFS)..."
+    GIT_LFS_SKIP_SMUDGE=0 git clone --depth 1 "$(hf_url "$repo")" "$output_dir"
 }
 
-# Pull LFS files in a directory
+# Clone a HuggingFace repo WITHOUT LFS files (fast clone, pull later)
+# Usage: hf_clone_shallow "org/model" "output_dir"
+hf_clone_shallow() {
+    local repo="$1"
+    local output_dir="$2"
+
+    ensure_git_lfs || return 1
+
+    # Remove existing directory if it's incomplete
+    if [[ -d "$output_dir" && ! -d "$output_dir/.git" ]]; then
+        rm -rf "$output_dir"
+    fi
+
+    if [[ -d "$output_dir/.git" ]]; then
+        log_info "Repository already cloned: $output_dir"
+        return 0
+    fi
+
+    log_info "Cloning ${repo} (shallow, no LFS)..."
+    GIT_LFS_SKIP_SMUDGE=1 git clone --depth 1 "$(hf_url "$repo")" "$output_dir"
+}
+
+# Pull specific LFS files by pattern
+# Usage: hf_lfs_pull "repo_dir" "*.onnx" "*.safetensors"
+# Usage: hf_lfs_pull "repo_dir" --include "onnx/*.onnx" --exclude "*_fp32*"
+hf_lfs_pull() {
+    local dir="$1"
+    shift
+
+    if [[ ! -d "$dir/.git" ]]; then
+        log_error "Not a git repository: $dir"
+        return 1
+    fi
+
+    (
+        cd "$dir"
+
+        # If arguments look like --include/--exclude, pass directly
+        if [[ "${1:-}" == --* ]]; then
+            log_info "Pulling LFS files: $*"
+            git lfs pull "$@"
+        else
+            # Otherwise treat as glob patterns for --include
+            local includes=()
+            for pattern in "$@"; do
+                includes+=("--include" "$pattern")
+            done
+            if [[ ${#includes[@]} -gt 0 ]]; then
+                log_info "Pulling LFS files: $*"
+                git lfs pull "${includes[@]}"
+            else
+                log_info "Pulling all LFS files..."
+                git lfs pull
+            fi
+        fi
+    )
+}
+
+# Download specific files from HuggingFace using huggingface-cli
+# Usage: hf_download "org/model" "output_dir" file1 file2 file3...
+# This is best for downloading a few specific files without cloning the whole repo
+hf_download() {
+    local repo="$1"
+    local output_dir="$2"
+    shift 2
+    local files=("$@")
+
+    ensure_hf_cli || return 1
+
+    mkdir -p "$output_dir"
+
+    local hf_args=()
+    [[ -n "${HF_TOKEN:-}" ]] && hf_args+=("--token" "$HF_TOKEN")
+
+    log_info "Downloading from ${repo}: ${files[*]}"
+    huggingface-cli download "$repo" \
+        "${files[@]}" \
+        --local-dir "$output_dir" \
+        "${hf_args[@]}" || {
+            log_error "Failed to download from $repo"
+            return 1
+        }
+
+    log_info "Downloaded to: $output_dir"
+}
+
+# Download a HuggingFace repo, checking if already complete
+# Usage: hf_download_repo "org/model" "output_dir" "checkpoint_file" file1 file2...
+# checkpoint_file is used to verify download is complete (e.g., "model.safetensors")
+hf_download_repo() {
+    local repo="$1"
+    local output_dir="$2"
+    local checkpoint_file="$3"
+    shift 3
+    local files=("$@")
+
+    # Check if already downloaded
+    if [[ -f "${output_dir}/${checkpoint_file}" ]]; then
+        local size
+        size=$(get_file_size "${output_dir}/${checkpoint_file}")
+        if [[ "$size" -gt 1000000 ]]; then  # > 1MB means real file, not LFS pointer
+            log_info "Already downloaded: ${output_dir}/${checkpoint_file} ($(numfmt --to=iec "$size" 2>/dev/null || echo "${size}B"))"
+            return 0
+        fi
+    fi
+
+    hf_download "$repo" "$output_dir" "${files[@]}"
+}
+
+# Pull LFS files in a directory (legacy compatibility)
 lfs_pull() {
     local dir="$1"
-    (cd "$dir" && git lfs pull)
+    shift
+    hf_lfs_pull "$dir" "$@"
 }
 
 # =============================================================================

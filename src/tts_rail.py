@@ -3,7 +3,6 @@ TTS Rail - Text-to-Speech abstraction with multiple backends.
 
 Supports:
 - MockTTSRail: Generates a beep for testing
-- CosyVoiceTTSRail: CosyVoice 2 via Triton Inference Server
 - ChatterboxTTSRail: Chatterbox Turbo via Triton Inference Server (TensorRT)
 """
 import logging
@@ -103,122 +102,6 @@ class MockTTSRail(BaseTTSRail):
     def reset(self) -> None:
         self._interrupted = False
         self._is_speaking = False
-
-
-class CosyVoiceTTSRail(BaseTTSRail):
-    """
-    CosyVoice 2 TTS via Triton Inference Server.
-
-    Streams audio chunks as they're generated for low latency.
-    Supports interrupt for barge-in.
-    Supports voice cloning via reference audio.
-    """
-
-    def __init__(
-        self,
-        triton_url: str = "localhost:8001",
-        model_name: str = "cosyvoice2",
-        reference_audio_path: str = None,
-        reference_text: str = None,
-    ):
-        from .triton_client import TritonClient, TritonConfig
-        from .tts.cosyvoice_tts import CosyVoiceTTS, TTSConfig
-
-        # Parse URL
-        host, port = triton_url.rsplit(":", 1) if ":" in triton_url else (triton_url, "8001")
-
-        logger.info(f"CosyVoiceTTSRail: connecting to {host}:{port}, model={model_name}")
-        if reference_audio_path:
-            logger.info(f"CosyVoiceTTSRail: using voice cloning from {reference_audio_path}")
-
-        # Create client
-        self._client = TritonClient(TritonConfig(host=host, port=int(port)))
-        self._tts = CosyVoiceTTS(
-            self._client,
-            TTSConfig(
-                model_name=model_name,
-                reference_audio_path=reference_audio_path,
-                reference_text=reference_text,
-            )
-        )
-        self._connected = False
-        self._triton_url = triton_url
-        self._model_name = model_name
-
-    async def _ensure_connected(self) -> None:
-        """Lazy connection to Triton."""
-        if not self._connected:
-            logger.info(f"TTS: Connecting to Triton at {self._triton_url}...")
-            connect_start = time.perf_counter()
-            await self._client.connect()
-            self._connected = True
-            elapsed = (time.perf_counter() - connect_start) * 1000
-            logger.info(f"TTS: Connected to Triton in {elapsed:.0f}ms")
-
-    async def synthesize(self, text: str) -> AsyncIterator[AudioChunk]:
-        """
-        Synthesize text to streaming audio.
-
-        Args:
-            text: Text to synthesize
-
-        Yields:
-            AudioChunk with PCM16 audio data
-        """
-        if not text.strip():
-            logger.warning("TTS: Empty text, skipping synthesis")
-            return
-
-        logger.info(f"TTS: Synthesizing {len(text)} chars: '{text[:50]}{'...' if len(text) > 50 else ''}'")
-        synth_start = time.perf_counter()
-
-        await self._ensure_connected()
-
-        chunk_count = 0
-        total_bytes = 0
-        first_chunk_time = None
-
-        try:
-            async for chunk in self._tts.synthesize(text):
-                chunk_count += 1
-                chunk_bytes = len(chunk.data)
-                total_bytes += chunk_bytes
-
-                if chunk_count == 1:
-                    first_chunk_time = (time.perf_counter() - synth_start) * 1000
-                    logger.info(f"TTS: First chunk in {first_chunk_time:.0f}ms ({chunk_bytes} bytes)")
-
-                logger.debug(f"TTS: Chunk {chunk_count}: {chunk_bytes} bytes, final={chunk.is_final}")
-
-                yield AudioChunk(data=chunk.data, is_final=chunk.is_final)
-
-            # Summary
-            total_time = (time.perf_counter() - synth_start) * 1000
-            duration_ms = (total_bytes / 2) / SAMPLE_RATE * 1000  # PCM16 = 2 bytes/sample
-            rtf = total_time / duration_ms if duration_ms > 0 else 0
-
-            logger.info(
-                f"TTS: Complete - {chunk_count} chunks, {total_bytes} bytes "
-                f"({duration_ms:.0f}ms audio) in {total_time:.0f}ms (RTF={rtf:.2f})"
-            )
-
-        except Exception as e:
-            logger.error(f"TTS: Synthesis error: {e}", exc_info=True)
-            raise
-
-    def interrupt(self) -> None:
-        """Interrupt ongoing synthesis (for barge-in)."""
-        logger.info("TTS: Interrupted")
-        self._tts.interrupt()
-
-    @property
-    def is_speaking(self) -> bool:
-        return self._tts.is_speaking
-
-    def reset(self) -> None:
-        """Reset TTS state."""
-        logger.debug("TTS: Reset")
-        self._tts.reset()
 
 
 class ChatterboxTTSRail(BaseTTSRail):
@@ -354,14 +237,13 @@ class ChatterboxTTSRail(BaseTTSRail):
 class TTSBackend(Enum):
     """Available TTS backends."""
     MOCK = "mock"
-    COSYVOICE = "cosyvoice"
     CHATTERBOX = "chatterbox"
 
 
 def create_tts_rail(
     backend: TTSBackend = TTSBackend.MOCK,
     triton_url: str = "localhost:8001",
-    model_name: str = "cosyvoice2",
+    model_name: str = "chatterbox",
     reference_audio_path: str = None,
     reference_text: str = None,
     exaggeration: float = 0.5,
@@ -380,15 +262,6 @@ def create_tts_rail(
     if backend == TTSBackend.MOCK:
         logger.info("Using MockTTSRail")
         return MockTTSRail()
-
-    elif backend == TTSBackend.COSYVOICE:
-        logger.info(f"Using CosyVoiceTTSRail: {triton_url}/{model_name}")
-        return CosyVoiceTTSRail(
-            triton_url=triton_url,
-            model_name=model_name,
-            reference_audio_path=reference_audio_path,
-            reference_text=reference_text,
-        )
 
     elif backend == TTSBackend.CHATTERBOX:
         logger.info(f"Using ChatterboxTTSRail: {triton_url}/{model_name}")

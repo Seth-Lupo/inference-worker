@@ -1,7 +1,9 @@
+# ONNX Runtime fallback config for chatterbox_embed
+# Use this if TensorRT engine build fails
+# Rename to config.pbtxt to use
+
 name: "chatterbox_embed"
-# TensorRT backend if model.plan exists, otherwise ONNX Runtime
-# Build script creates model.plan for TensorRT, model.onnx for ONNX fallback
-platform: "tensorrt_plan"
+platform: "onnxruntime_onnx"
 max_batch_size: 8
 
 input [
@@ -15,7 +17,7 @@ input [
 output [
   {
     name: "embeddings"
-    data_type: TYPE_FP16
+    data_type: TYPE_FP32
     dims: [-1, 896]
   }
 ]
@@ -26,6 +28,14 @@ instance_group [
     kind: KIND_GPU
   }
 ]
+
+optimization {
+  execution_accelerators {
+    gpu_execution_accelerator : [
+      { name : "cuda" }
+    ]
+  }
+}
 
 dynamic_batching {
   preferred_batch_size: [1, 2, 4]

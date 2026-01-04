@@ -1,0 +1,32 @@
+{
+  "architectures": ["T3ForCausalLM"],
+  "model_type": "t3",
+  "auto_map": {
+    "AutoConfig": "configuration_t3.T3Config",
+    "AutoModelForCausalLM": "modeling_t3.T3ForCausalLM"
+  },
+  "vocab_size": 8194,
+  "text_vocab_size": 704,
+  "speech_vocab_size": 8194,
+  "n_embd": 768,
+  "n_head": 12,
+  "n_layer": 24,
+  "n_positions": 4096,
+  "hidden_size": 768,
+  "intermediate_size": 3072,
+  "num_attention_heads": 12,
+  "num_hidden_layers": 24,
+  "max_position_embeddings": 4096,
+  "layer_norm_eps": 1e-5,
+  "initializer_range": 0.02,
+  "use_cache": true,
+  "bos_token_id": 0,
+  "eos_token_id": 1,
+  "pad_token_id": 2,
+  "tie_word_embeddings": false,
+  "torch_dtype": "float16",
+  "transformers_version": "4.40.0",
+  "_name_or_path": "ResembleAI/chatterbox-turbo",
+  "speaker_embed_dim": 256,
+  "cond_channels": 768
+}

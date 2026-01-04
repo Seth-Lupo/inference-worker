@@ -1,94 +1,81 @@
 #!/bin/bash
 # =============================================================================
-# Build Chatterbox Turbo TensorRT Engines (TTS Model)
+# Build Chatterbox Turbo TensorRT Engines
 #
-# Downloads Chatterbox-Turbo-ONNX from HuggingFace, builds TRT engines,
-# and creates Triton model repository with 5 models:
-#   - chatterbox (BLS orchestrator - Python backend)
-#   - embed_tokens (TensorRT)
-#   - language_model (TensorRT with KV cache)
-#   - speech_encoder (TensorRT)
-#   - conditional_decoder (TensorRT)
+# Downloads ONNX models from HuggingFace and builds TensorRT engines for
+# all non-autoregressive models. The LM can optionally use vLLM.
+#
+# Architecture:
+#   - embed_tokens: TensorRT (token embedding)
+#   - speech_encoder: TensorRT (reference audio -> speaker embedding)
+#   - conditional_decoder: ONNX Runtime (speech tokens -> audio waveform)
+#   - language_model: vLLM or ONNX Runtime (autoregressive generation)
+#
+# Note: conditional_decoder has multiple inputs (speech_tokens, speaker_embeddings,
+# speaker_features) making TensorRT compilation complex. Using ONNX Runtime.
 #
 # Usage:
 #   ./build_chatterbox.sh [START_STAGE] [STOP_STAGE]
-#   ./build_chatterbox.sh 0 2       # Run all stages
+#   ./build_chatterbox.sh 0 3       # Run all stages
 #   ./build_chatterbox.sh 1 1       # Only build TRT engines
-#   ./build_chatterbox.sh cleanup   # Clean up build artifacts
+#   ./build_chatterbox.sh 3 3       # Only build T3 for vLLM
+#   ./build_chatterbox.sh cleanup   # Clean up
 #
 # Stages:
 #    0: Download ONNX models from HuggingFace
-#    1: Build ONNX to TensorRT engines
+#    1: Build TensorRT engines
 #    2: Create Triton model repository
+#    3: Build T3 model for vLLM (optional LLM serving)
 #
-# Environment Variables:
-#   HF_TOKEN              - HuggingFace token (optional)
-#   CHATTERBOX_PRECISION  - fp16, fp32 (default: fp16)
-#
-# Sources:
-#   - https://huggingface.co/ResembleAI/chatterbox-turbo-ONNX
+# TensorRT Version:
+#   Run inside nvcr.io/nvidia/tensorrt:24.12-py3
+#   Runtime: nvcr.io/nvidia/tritonserver:24.12-py3
 # =============================================================================
 
+# Load shared utilities
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/common.sh"
 
 # =============================================================================
 # Configuration
 # =============================================================================
-HF_REPO="${HF_REPO:-ResembleAI/chatterbox-turbo-ONNX}"
-PRECISION="${CHATTERBOX_PRECISION:-fp16}"
-
-# TensorRT image for building
-TRT_IMAGE="${TRT_IMAGE:-$(cfg_get 'images.tensorrt' 'nvcr.io/nvidia/tensorrt:25.09-py3')}"
+readonly MODEL_NAME="chatterbox"
+HF_REPO="${HF_REPO:-$(cfg_get 'chatterbox.hf_repo_onnx' 'ResembleAI/chatterbox-turbo-ONNX')}"
+HF_REPO_T3="${HF_REPO_T3:-$(cfg_get 'chatterbox.hf_repo' 'ResembleAI/chatterbox-turbo')}"
+PRECISION="${CHATTERBOX_PRECISION:-$(cfg_get 'chatterbox.precision' 'fp16')}"
 
 # Paths
 readonly DEPLOY_DIR="$(get_deploy_dir)"
 readonly WORK_DIR="${DEPLOY_DIR}/chatterbox_build"
+readonly CLONE_DIR="${WORK_DIR}/chatterbox-turbo-ONNX"
+readonly ONNX_DIR="${WORK_DIR}/onnx"
 readonly MODEL_REPO="${DEPLOY_DIR}/model_repository/tts"
+readonly MODEL_DIR="${MODEL_REPO}/${MODEL_NAME}"
+readonly ASSETS_DIR="${MODEL_REPO}/${MODEL_NAME}_assets"
+readonly VLLM_MODELS="${DEPLOY_DIR}/vllm_models"
+readonly T3_MODEL_DIR="${VLLM_MODELS}/t3_turbo"
+readonly T3_TEMPLATE_DIR="${DEPLOY_DIR}/models/t3_turbo"
 
-# ONNX model files based on precision
+# ONNX model files
 if [[ "$PRECISION" == "fp16" ]]; then
-    EMBED_TOKENS_ONNX="embed_tokens_fp16.onnx"
-    LANGUAGE_MODEL_ONNX="language_model_fp16.onnx"
-    SPEECH_ENCODER_ONNX="speech_encoder_fp16.onnx"
-    CONDITIONAL_DECODER_ONNX="conditional_decoder_fp16.onnx"
+    EMBED_ONNX="embed_tokens_fp16.onnx"
+    LM_ONNX="language_model_fp16.onnx"
+    ENCODER_ONNX="speech_encoder_fp16.onnx"
+    DECODER_ONNX="conditional_decoder_fp16.onnx"
 else
-    EMBED_TOKENS_ONNX="embed_tokens.onnx"
-    LANGUAGE_MODEL_ONNX="language_model.onnx"
-    SPEECH_ENCODER_ONNX="speech_encoder.onnx"
-    CONDITIONAL_DECODER_ONNX="conditional_decoder.onnx"
+    EMBED_ONNX="embed_tokens.onnx"
+    LM_ONNX="language_model.onnx"
+    ENCODER_ONNX="speech_encoder.onnx"
+    DECODER_ONNX="conditional_decoder.onnx"
 fi
 
-# Dynamic shapes for each model
-# embed_tokens: input_ids (batch, seq) -> embeddings (batch, seq, hidden)
-EMBED_TOKENS_MIN="input_ids:1x1"
-EMBED_TOKENS_OPT="input_ids:4x256"
-EMBED_TOKENS_MAX="input_ids:8x1024"
-
-# language_model: autoregressive with KV cache
-# Inputs: input_embeds, attention_mask, position_ids, past_key_values (optional)
-# For first pass (no cache): full sequence
-# For subsequent passes: single token with cache
-LM_MIN="inputs_embeds:1x1x896,attention_mask:1x1,position_ids:1x1"
-LM_OPT="inputs_embeds:4x256x896,attention_mask:4x256,position_ids:4x256"
-LM_MAX="inputs_embeds:8x1024x896,attention_mask:8x1024,position_ids:8x1024"
-
-# speech_encoder: reference audio -> conditioning
-# Input: audio features (batch, time, features)
-SPEECH_ENC_MIN="input_features:1x1x80"
-SPEECH_ENC_OPT="input_features:1x500x80"
-SPEECH_ENC_MAX="input_features:1x3000x80"
-
-# conditional_decoder: single-step mel generation
-# Input: speech_tokens, conditioning
-COND_DEC_MIN="input_ids:1x1"
-COND_DEC_OPT="input_ids:1x256"
-COND_DEC_MAX="input_ids:1x1024"
-
-# =============================================================================
-# Load environment
-# =============================================================================
-load_env
+# TensorRT dynamic shapes
+# Format: min,opt,max for each input
+declare -A TRT_SHAPES=(
+    ["embed_tokens"]="input_ids:1x1,input_ids:4x256,input_ids:8x1024"
+    ["speech_encoder"]="input_features:1x80x100,input_features:1x80x500,input_features:1x80x3000"
+)
+# Note: conditional_decoder uses ONNX Runtime (multi-input vocoder)
 
 # =============================================================================
 # Cleanup Handler
@@ -97,19 +84,32 @@ if [[ "${1:-}" == "cleanup" || "${1:-}" == "clean" ]]; then
     echo "=============================================="
     echo "Cleaning up Chatterbox build artifacts"
     echo "=============================================="
-
     case "${2:-}" in
         --all|-a)
             log_warn "Removing ALL build artifacts..."
             rm -rf "$WORK_DIR"
-            rm -rf "${MODEL_REPO}/chatterbox"
-            rm -rf "${MODEL_REPO}/chatterbox_assets"
+            rm -rf "$MODEL_DIR"
+            rm -rf "$ASSETS_DIR"
+            rm -rf "$T3_MODEL_DIR"
             log_info "Cleanup complete"
+            ;;
+        --t3)
+            log_info "Removing T3 model..."
+            rm -rf "$T3_MODEL_DIR"
+            log_info "T3 model removed"
+            ;;
+        --engines|-e)
+            log_info "Removing TRT engines only..."
+            rm -rf "${WORK_DIR}/engines"
+            rm -rf "${MODEL_DIR}/1/engines"
+            log_info "Engines removed"
             ;;
         *)
             log_info "Removing downloads (keeping engines)..."
-            rm -rf "${WORK_DIR}/onnx"
-            log_info "Kept: ${WORK_DIR}/engines"
+            rm -rf "$CLONE_DIR"
+            log_info "Cleanup complete"
+            log_info "To also remove model: $0 cleanup --all"
+            log_info "To rebuild engines:   $0 cleanup --engines"
             ;;
     esac
     exit 0
@@ -117,14 +117,13 @@ fi
 
 # Parse stages
 START_STAGE="${1:-0}"
-STOP_STAGE="${2:-2}"
+STOP_STAGE="${2:-3}"
 
 echo "=============================================="
-echo "Building Chatterbox Turbo TensorRT"
+echo "Building Chatterbox Turbo TensorRT Engines"
 echo "=============================================="
 echo "Stages: ${START_STAGE} to ${STOP_STAGE}"
 echo "Precision: ${PRECISION}"
-echo "TRT Image: ${TRT_IMAGE}"
 echo ""
 
 mkdir -p "$WORK_DIR"
@@ -132,278 +131,306 @@ mkdir -p "$WORK_DIR"
 # =============================================================================
 # Stage 0: Download ONNX Models
 # =============================================================================
-stage_download_models() {
+stage_download() {
     log_step "Stage 0: Downloading ONNX models from HuggingFace..."
 
-    local clone_dir="${WORK_DIR}/chatterbox-turbo-ONNX"
-    local onnx_dir="${WORK_DIR}/onnx"
+    mkdir -p "$ONNX_DIR"
 
-    # Check if models already exist
-    if [[ -f "${onnx_dir}/${LANGUAGE_MODEL_ONNX}" ]]; then
-        local size
-        size=$(get_file_size "${onnx_dir}/${LANGUAGE_MODEL_ONNX}")
-        if [[ "$size" -gt 1000000 ]]; then
-            log_info "ONNX models already downloaded (language_model: $(numfmt --to=iec "$size" 2>/dev/null || echo "${size}B"))"
-            return 0
-        fi
+    # Check if already downloaded (LM is the largest file)
+    if is_real_file "${ONNX_DIR}/${LM_ONNX}" 100000000; then
+        log_info "ONNX models already downloaded at: $ONNX_DIR"
+        return 0
     fi
 
-    # Ensure git-lfs is installed
-    ensure_git_lfs || return 1
+    # Clone repo (shallow, no LFS yet)
+    hf_clone_shallow "$HF_REPO" "$CLONE_DIR" || {
+        log_error "Failed to clone from HuggingFace"
+        return 1
+    }
 
-    # Clone the repository with LFS
-    local git_url="https://huggingface.co/${HF_REPO}"
-    if [[ -n "${HF_TOKEN:-}" ]]; then
-        git_url="https://USER:${HF_TOKEN}@huggingface.co/${HF_REPO}"
-    fi
-
-    if [[ -d "$clone_dir/.git" ]]; then
-        log_info "Repository already cloned, pulling LFS files..."
-        (cd "$clone_dir" && git lfs pull --include="onnx/*" && git restore --source=HEAD :/ 2>/dev/null || true)
+    # Pull specific LFS files based on precision
+    if [[ "$PRECISION" == "fp16" ]]; then
+        hf_lfs_pull "$CLONE_DIR" \
+            --include "onnx/*_fp16.onnx" \
+            --include "onnx/*_fp16.onnx_data" \
+            --include "*.json"
     else
-        log_info "Cloning ${HF_REPO} with git-lfs..."
-
-        # Remove partial clone if exists
-        rm -rf "$clone_dir"
-
-        # First clone without LFS to avoid checkout issues with large files
-        GIT_LFS_SKIP_SMUDGE=1 git clone --depth 1 "$git_url" "$clone_dir" || {
-            log_error "Failed to clone repository"
-            return 1
-        }
-
-        # Now pull only the ONNX files we need (based on precision)
-        log_info "Pulling LFS files for ${PRECISION} precision..."
-        (
-            cd "$clone_dir"
-
-            # Pull specific files based on precision
-            if [[ "$PRECISION" == "fp16" ]]; then
-                git lfs pull --include="onnx/*_fp16.onnx,onnx/*_fp16.onnx_data"
-            else
-                git lfs pull --include="onnx/embed_tokens.onnx,onnx/embed_tokens.onnx_data,onnx/language_model.onnx,onnx/language_model.onnx_data,onnx/speech_encoder.onnx,onnx/speech_encoder.onnx_data,onnx/conditional_decoder.onnx,onnx/conditional_decoder.onnx_data"
-            fi
-
-            # Also pull config files (small, not LFS)
-            git lfs pull --include="*.json"
-        ) || {
-            log_error "Failed to pull LFS files"
-            return 1
-        }
+        hf_lfs_pull "$CLONE_DIR" \
+            --include "onnx/*.onnx" \
+            --include "onnx/*.onnx_data" \
+            --exclude "onnx/*_fp16*" \
+            --include "*.json"
     fi
 
-    # Checkout files from LFS cache if needed
-    log_info "Checking out LFS files..."
-    (
-        cd "$clone_dir"
-        git lfs checkout 2>/dev/null || true
-    )
+    # Copy to onnx_dir
+    cp "${CLONE_DIR}/onnx/${EMBED_ONNX}"* "$ONNX_DIR/" 2>/dev/null || true
+    cp "${CLONE_DIR}/onnx/${LM_ONNX}"* "$ONNX_DIR/" 2>/dev/null || true
+    cp "${CLONE_DIR}/onnx/${ENCODER_ONNX}"* "$ONNX_DIR/" 2>/dev/null || true
+    cp "${CLONE_DIR}/onnx/${DECODER_ONNX}"* "$ONNX_DIR/" 2>/dev/null || true
+    cp "${CLONE_DIR}"/*.json "$ONNX_DIR/" 2>/dev/null || true
 
-    # Verify LFS files were downloaded (not just pointers)
-    # Note: ONNX splits into .onnx (graph, small) and .onnx_data (weights, large)
-    # We check the _data file which contains the actual weights
-    local lm_data_file="${clone_dir}/onnx/${LANGUAGE_MODEL_ONNX}_data"
-    local lm_graph_file="${clone_dir}/onnx/${LANGUAGE_MODEL_ONNX}"
-
-    if [[ ! -f "$lm_graph_file" ]]; then
-        log_error "ONNX graph file not found: $lm_graph_file"
-        return 1
-    fi
-
-    if [[ ! -f "$lm_data_file" ]]; then
-        log_error "ONNX data file not found: $lm_data_file"
-        log_info "Available files:"
-        ls -la "${clone_dir}/onnx/" 2>/dev/null | head -20
-        return 1
-    fi
-
-    local graph_size data_size
-    graph_size=$(get_file_size "$lm_graph_file")
-    data_size=$(get_file_size "$lm_data_file")
-
-    # Data file should be > 100MB for the language model
-    if [[ "$data_size" -lt 100000000 ]]; then
-        log_warn "Data file appears to be LFS pointer (${data_size} bytes). Fetching..."
-        (
-            cd "$clone_dir"
-            git lfs fetch --include="onnx/*_fp16.onnx_data" 2>/dev/null || git lfs fetch --all
-            git lfs checkout onnx/
-        )
-        data_size=$(get_file_size "$lm_data_file")
-        if [[ "$data_size" -lt 100000000 ]]; then
-            log_error "Failed to download LFS data files. Size: ${data_size} bytes"
-            log_info "Try manually: cd ${clone_dir} && git lfs fetch --all && git lfs checkout"
-            return 1
+    # Verify key files
+    local required_files=("$EMBED_ONNX" "$LM_ONNX" "$ENCODER_ONNX" "$DECODER_ONNX")
+    for file in "${required_files[@]}"; do
+        if [[ ! -f "${ONNX_DIR}/${file}" ]]; then
+            log_warn "Missing ONNX file: ${file}"
         fi
-    fi
-
-    log_info "Language model: graph=$(numfmt --to=iec "$graph_size" 2>/dev/null || echo "${graph_size}B"), data=$(numfmt --to=iec "$data_size" 2>/dev/null || echo "${data_size}B")"
-
-    # Copy files to onnx_dir
-    mkdir -p "$onnx_dir"
-
-    log_info "Copying ONNX models..."
-    cp "${clone_dir}/onnx/${EMBED_TOKENS_ONNX}"* "$onnx_dir/" 2>/dev/null || true
-    cp "${clone_dir}/onnx/${LANGUAGE_MODEL_ONNX}"* "$onnx_dir/" 2>/dev/null || true
-    cp "${clone_dir}/onnx/${SPEECH_ENCODER_ONNX}"* "$onnx_dir/" 2>/dev/null || true
-    cp "${clone_dir}/onnx/${CONDITIONAL_DECODER_ONNX}"* "$onnx_dir/" 2>/dev/null || true
-
-    log_info "Copying config files..."
-    cp "${clone_dir}/config.json" "$onnx_dir/" 2>/dev/null || true
-    cp "${clone_dir}/tokenizer.json" "$onnx_dir/" 2>/dev/null || true
-    cp "${clone_dir}/tokenizer_config.json" "$onnx_dir/" 2>/dev/null || true
-
-    # List downloaded files
-    log_info "Downloaded files:"
-    ls -lh "$onnx_dir"/*.onnx 2>/dev/null | while read -r line; do
-        log_info "  $line"
     done
 
-    log_info "ONNX models ready at ${onnx_dir}"
+    log_info "ONNX models ready at: $ONNX_DIR"
+    ls -lh "$ONNX_DIR"/*.onnx 2>/dev/null || true
 }
 
 # =============================================================================
-# Stage 1: Validate ONNX Models (No TensorRT - models use custom ops)
+# Stage 1: Build TensorRT Engines
 # =============================================================================
+build_engine() {
+    local name="$1"
+    local onnx_file="$2"
+    local engine_file="$3"
+    local shapes="$4"
+
+    if [[ -f "$engine_file" ]]; then
+        log_info "  $name: Engine exists, skipping"
+        return 0
+    fi
+
+    if [[ ! -f "$onnx_file" ]]; then
+        log_warn "  $name: ONNX not found, skipping"
+        return 1
+    fi
+
+    log_info "  $name: Building TensorRT engine..."
+
+    # Parse shapes (format: "name:min,name:opt,name:max")
+    local min_shape opt_shape max_shape
+    IFS=',' read -r min_shape opt_shape max_shape <<< "$shapes"
+
+    local cmd="trtexec --onnx=$onnx_file --saveEngine=$engine_file"
+    cmd+=" --minShapes=$min_shape --optShapes=$opt_shape --maxShapes=$max_shape"
+    [[ "$PRECISION" == "fp16" ]] && cmd+=" --fp16"
+    cmd+=" --workspace=4096"
+
+    # Try to build
+    if $cmd > "${engine_file%.engine}.log" 2>&1; then
+        local size=$(get_file_size "$engine_file")
+        log_info "  $name: Built successfully ($(numfmt --to=iec "$size" 2>/dev/null || echo "${size}B"))"
+        return 0
+    else
+        log_warn "  $name: TensorRT build failed, will use ONNX Runtime"
+        cat "${engine_file%.engine}.log" | tail -20
+        return 1
+    fi
+}
+
 stage_build_engines() {
-    log_step "Stage 1: Validating ONNX models..."
+    log_step "Stage 1: Building TensorRT engines..."
 
-    local onnx_dir="${WORK_DIR}/onnx"
+    local engine_dir="${WORK_DIR}/engines"
+    mkdir -p "$engine_dir"
 
-    if [[ ! -d "$onnx_dir" ]]; then
+    # Verify ONNX models exist
+    if [[ ! -f "${ONNX_DIR}/${EMBED_ONNX}" ]]; then
         log_error "ONNX models not found. Run stage 0 first."
         return 1
     fi
 
-    # These ONNX models use custom operators not supported by TensorRT:
-    # - speech_encoder: STFT (custom audio DSP)
-    # - conditional_decoder: MultiHeadAttention (com.microsoft domain)
-    # - language_model: likely similar custom ops
-    #
-    # Solution: Use ONNX Runtime with CUDA Execution Provider
-    # ONNX Runtime will use TensorRT EP for supported ops automatically
+    if ! command -v trtexec &>/dev/null; then
+        log_error "trtexec not found. Run inside TensorRT container:"
+        log_error "  docker compose --profile build run model-builder"
+        return 1
+    fi
 
-    log_info "Chatterbox ONNX models use custom operators (STFT, MultiHeadAttention)"
-    log_info "Skipping TensorRT engine build - will use ONNX Runtime with CUDA EP"
-    log_info ""
-    log_info "Models to be loaded by ONNX Runtime:"
+    # Build each non-autoregressive model
+    local success=0
+    local failed=0
 
-    for model in embed_tokens language_model speech_encoder conditional_decoder; do
-        local onnx_file
-        if [[ "$PRECISION" == "fp16" ]]; then
-            onnx_file="${onnx_dir}/${model}_fp16.onnx"
-        else
-            onnx_file="${onnx_dir}/${model}.onnx"
-        fi
+    # embed_tokens
+    if build_engine "embed_tokens" \
+        "${ONNX_DIR}/${EMBED_ONNX}" \
+        "${engine_dir}/embed_tokens.engine" \
+        "${TRT_SHAPES[embed_tokens]}"; then
+        ((success++))
+    else
+        ((failed++))
+    fi
 
-        if [[ -f "$onnx_file" ]]; then
-            local size
-            size=$(get_file_size "$onnx_file")
-            log_info "  - ${model}: $(basename "$onnx_file") ($(numfmt --to=iec "$size" 2>/dev/null || echo "${size}B"))"
-        else
-            log_warn "  - ${model}: NOT FOUND"
-        fi
-    done
+    # speech_encoder (mel features input, no STFT needed in TRT)
+    if build_engine "speech_encoder" \
+        "${ONNX_DIR}/${ENCODER_ONNX}" \
+        "${engine_dir}/speech_encoder.engine" \
+        "${TRT_SHAPES[speech_encoder]}"; then
+        ((success++))
+    else
+        ((failed++))
+    fi
 
-    log_info ""
-    log_info "ONNX Runtime will automatically use TensorRT EP for supported ops"
-    log_info "and fall back to CUDA EP for custom ops (STFT, MultiHeadAttention)"
+    # conditional_decoder - skip TensorRT (multiple inputs, use ONNX Runtime)
+    log_info "  conditional_decoder: Using ONNX Runtime (multi-input vocoder)"
+
+    echo ""
+    log_info "TensorRT build complete: $success succeeded, $failed failed"
+
+    # Language model stays as ONNX (for vLLM or ONNX Runtime)
+    log_info "language_model: Kept as ONNX (use vLLM or ONNX Runtime)"
 }
 
 # =============================================================================
 # Stage 2: Create Model Repository
 # =============================================================================
-stage_create_model_repo() {
-    log_step "Stage 2: Setting up Triton model repository..."
+stage_create_repo() {
+    log_step "Stage 2: Creating Triton model repository..."
 
     local engine_dir="${WORK_DIR}/engines"
-    local onnx_dir="${WORK_DIR}/onnx"
-    local assets_dir="${MODEL_REPO}/chatterbox_assets"
 
-    # Create directories
-    mkdir -p "${assets_dir}"
-    mkdir -p "${MODEL_REPO}/chatterbox/1"
-    mkdir -p "${MODEL_REPO}/chatterbox_lm/1"
-    mkdir -p "${MODEL_REPO}/chatterbox_encoder/1"
-    mkdir -p "${MODEL_REPO}/chatterbox_decoder/1"
-    mkdir -p "${MODEL_REPO}/chatterbox_embed/1"
+    mkdir -p "${MODEL_DIR}/1/engines"
+    mkdir -p "${ASSETS_DIR}"
 
-    # Copy ONNX models (all use ONNX Runtime, not TensorRT)
-    log_info "Copying ONNX models for ONNX Runtime..."
-
-    # Helper to copy model with data file
-    copy_onnx_model() {
-        local model_name="$1"
-        local dest_dir="$2"
-        local onnx_file data_file
-
-        if [[ "$PRECISION" == "fp16" ]]; then
-            onnx_file="${onnx_dir}/${model_name}_fp16.onnx"
-            data_file="${onnx_dir}/${model_name}_fp16.onnx_data"
+    # Copy TensorRT engines (or ONNX fallbacks)
+    for model in embed_tokens speech_encoder conditional_decoder; do
+        if [[ -f "${engine_dir}/${model}.engine" ]]; then
+            cp "${engine_dir}/${model}.engine" "${MODEL_DIR}/1/engines/"
+            log_info "  $model: TensorRT engine"
         else
-            onnx_file="${onnx_dir}/${model_name}.onnx"
-            data_file="${onnx_dir}/${model_name}.onnx_data"
+            # Fallback to ONNX
+            local onnx_name
+            case $model in
+                embed_tokens) onnx_name="$EMBED_ONNX" ;;
+                speech_encoder) onnx_name="$ENCODER_ONNX" ;;
+                conditional_decoder) onnx_name="$DECODER_ONNX" ;;
+            esac
+            cp "${ONNX_DIR}/${onnx_name}"* "${MODEL_DIR}/1/engines/" 2>/dev/null || true
+            log_info "  $model: ONNX fallback"
         fi
+    done
 
-        if [[ -f "$onnx_file" ]]; then
-            cp "$onnx_file" "${dest_dir}/model.onnx"
-            log_info "  Copied ${model_name} -> ${dest_dir}/model.onnx"
+    # Copy language model ONNX (for the autoregressive loop)
+    cp "${ONNX_DIR}/${LM_ONNX}"* "${MODEL_DIR}/1/engines/" 2>/dev/null || true
+    log_info "  language_model: ONNX"
+
+    # Copy config files to assets
+    cp "${ONNX_DIR}"/*.json "${ASSETS_DIR}/" 2>/dev/null || true
+
+    log_info "Model repository created: ${MODEL_DIR}"
+}
+
+# =============================================================================
+# Stage 3: Build T3 Model for vLLM
+# =============================================================================
+stage_build_t3() {
+    log_step "Stage 3: Building T3 model for vLLM..."
+
+    mkdir -p "$T3_MODEL_DIR"
+
+    # T3 model files to download
+    local t3_files=(
+        "t3_turbo_v1.safetensors"
+        "t3_turbo_v1.yaml"
+        "tokenizer_config.json"
+        "vocab.json"
+        "merges.txt"
+    )
+
+    # Check if model already exists
+    if is_real_file "${T3_MODEL_DIR}/model.safetensors" 100000000; then
+        local size
+        size=$(get_file_size "${T3_MODEL_DIR}/model.safetensors")
+        log_info "T3 model already downloaded ($(numfmt --to=iec "$size" 2>/dev/null || echo "${size}B"))"
+    else
+        # Download using common function
+        hf_download "$HF_REPO_T3" "$T3_MODEL_DIR" "${t3_files[@]}" || {
+            log_error "Failed to download T3 model"
+            return 1
+        }
+
+        # Rename to standard HuggingFace format
+        if [[ -f "${T3_MODEL_DIR}/t3_turbo_v1.safetensors" ]]; then
+            mv "${T3_MODEL_DIR}/t3_turbo_v1.safetensors" "${T3_MODEL_DIR}/model.safetensors"
+            log_info "Renamed to model.safetensors"
         fi
-        if [[ -f "$data_file" ]]; then
-            cp "$data_file" "${dest_dir}/model.onnx_data"
-            log_info "  Copied ${model_name}_data -> ${dest_dir}/model.onnx_data"
-        fi
-    }
+    fi
 
-    copy_onnx_model "embed_tokens" "${MODEL_REPO}/chatterbox_embed/1"
-    copy_onnx_model "language_model" "${MODEL_REPO}/chatterbox_lm/1"
-    copy_onnx_model "speech_encoder" "${MODEL_REPO}/chatterbox_encoder/1"
-    copy_onnx_model "conditional_decoder" "${MODEL_REPO}/chatterbox_decoder/1"
+    # Copy HuggingFace-compatible config files from template
+    log_info "Setting up HuggingFace-compatible configuration..."
+    if [[ -d "$T3_TEMPLATE_DIR" ]]; then
+        cp "${T3_TEMPLATE_DIR}/config.json" "${T3_MODEL_DIR}/" 2>/dev/null || true
+        cp "${T3_TEMPLATE_DIR}/configuration_t3.py" "${T3_MODEL_DIR}/" 2>/dev/null || true
+        cp "${T3_TEMPLATE_DIR}/modeling_t3.py" "${T3_MODEL_DIR}/" 2>/dev/null || true
+    else
+        log_warn "T3 template directory not found: $T3_TEMPLATE_DIR"
+        log_warn "You may need to create config.json and modeling_t3.py manually"
+    fi
 
-    # Copy config files
-    log_info "Copying configuration files..."
-    cp "${onnx_dir}/config.json" "${assets_dir}/" 2>/dev/null || true
-    cp "${onnx_dir}/tokenizer.json" "${assets_dir}/" 2>/dev/null || true
-    cp "${onnx_dir}/tokenizer_config.json" "${assets_dir}/" 2>/dev/null || true
+    # Verify
+    if [[ -f "${T3_MODEL_DIR}/model.safetensors" ]]; then
+        local size
+        size=$(get_file_size "${T3_MODEL_DIR}/model.safetensors")
+        log_info "T3 model ready: $(numfmt --to=iec "$size" 2>/dev/null || echo "${size}B")"
+    else
+        log_error "T3 model download failed"
+        return 1
+    fi
 
-    log_info "Model repository created at ${MODEL_REPO}"
-    log_info "Models:"
-    ls -1 "$MODEL_REPO" | grep chatterbox || echo "  (models not yet created)"
+    log_info "T3 model directory: ${T3_MODEL_DIR}"
+}
+
+# =============================================================================
+# Summary
+# =============================================================================
+show_summary() {
+    echo ""
+    echo "=============================================="
+    echo -e "${GREEN}Chatterbox Build Complete${NC}"
+    echo "=============================================="
+    echo ""
+    echo "Models built:"
+    echo "  - Triton TTS: ${MODEL_DIR}"
+    [[ $STOP_STAGE -ge 3 ]] && echo "  - vLLM T3:    ${T3_MODEL_DIR}"
+    echo ""
+
+    if [[ -d "${MODEL_DIR}/1/engines" ]]; then
+        echo "Engines:"
+        ls -lh "${MODEL_DIR}/1/engines/"*.engine 2>/dev/null || echo "  (ONNX fallback)"
+        echo ""
+    fi
+
+    echo "Next steps:"
+    echo "  1. Start Triton: docker compose up -d triton"
+    [[ $STOP_STAGE -ge 3 ]] && echo "  2. Start vLLM T3: docker compose --profile t3 up -d"
+    echo "  3. Start worker: docker compose up -d worker"
+    echo ""
+    echo "Cleanup options:"
+    echo "  $0 cleanup            # Remove downloads, keep model"
+    echo "  $0 cleanup --engines  # Rebuild TRT engines"
+    echo "  $0 cleanup --t3       # Remove T3 model"
+    echo "  $0 cleanup --all      # Remove everything"
 }
 
 # =============================================================================
 # Main
 # =============================================================================
 main() {
-    # Stage 0: Download models
+    # Stage 0: Download ONNX models
     if [[ $START_STAGE -le 0 && $STOP_STAGE -ge 0 ]]; then
-        stage_download_models
+        stage_download
     fi
 
-    # Stage 1: Build TRT engines
+    # Stage 1: Build TensorRT engines
     if [[ $START_STAGE -le 1 && $STOP_STAGE -ge 1 ]]; then
         stage_build_engines
     fi
 
-    # Stage 2: Create model repo
+    # Stage 2: Create Triton model repository
     if [[ $START_STAGE -le 2 && $STOP_STAGE -ge 2 ]]; then
-        stage_create_model_repo
+        stage_create_repo
     fi
 
-    echo ""
-    echo "=============================================="
-    echo -e "${GREEN}Chatterbox Turbo Build Complete${NC}"
-    echo "=============================================="
-    echo ""
-    echo "Model repository: ${MODEL_REPO}"
-    echo ""
-    echo "Next steps:"
-    echo "  1. Ensure Triton model configs are in place"
-    echo "  2. Start Triton: docker compose up -d triton"
-    echo ""
-    echo "Cleanup options:"
-    echo "  $0 cleanup           # Remove downloads, keep engines"
-    echo "  $0 cleanup --all     # Remove everything"
+    # Stage 3: Build T3 for vLLM
+    if [[ $START_STAGE -le 3 && $STOP_STAGE -ge 3 ]]; then
+        stage_build_t3
+    fi
+
+    show_summary
 }
 
 main

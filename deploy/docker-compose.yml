@@ -1,77 +1,187 @@
 version: "3.8"
 
+# =============================================================================
+# Voice Agent Inference Stack
+#
+# Architecture:
+# - vLLM (Port 8000): Qwen3 for chat/reasoning
+# - vLLM (Port 8010): T3 for speech token generation (Chatterbox LM)
+# - Triton (Port 8001): Non-LLM models (encoder, decoder, embedding)
+# - Worker (Port 80): WebSocket server
+#
+# TensorRT Version Compatibility:
+# - Build and runtime use matching NGC container versions (24.12)
+# =============================================================================
+
 services:
   # =============================================================================
-  # Triton Inference Server with TensorRT-LLM Backend
-  # Models: qwen3_8b, parakeet_tdt, cosyvoice2 (7 submodels)
+  # vLLM - Qwen3 (Main Reasoning LLM)
+  # API: OpenAI-compatible at port 8000
   # =============================================================================
-  triton:
-    # Custom Triton image with TensorRT-LLM + Python backends
-    build:
-      context: .
-      dockerfile: Dockerfile.triton
-    image: voice-agent-triton:latest
-    container_name: voice-agent-triton
+  vllm-qwen:
+    image: vllm/vllm-openai:latest
+    container_name: voice-agent-vllm-qwen
     restart: unless-stopped
 
-    # GPU access
     deploy:
       resources:
         reservations:
           devices:
             - driver: nvidia
-              count: all
+              device_ids: ["0"]
               capabilities: [gpu]
 
-    # Shared memory for TensorRT-LLM
+    shm_size: "16g"
+    ulimits:
+      memlock: -1
+      stack: 67108864
+
+    ports:
+      - "8000:8000"
+
+    volumes:
+      - ${HF_HOME:-~/.cache/huggingface}:/root/.cache/huggingface
+
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+      - HF_TOKEN=${HF_TOKEN}
+      - VLLM_ATTENTION_BACKEND=FLASHINFER
+
+    command: >
+      --model ${VLLM_MODEL:-Qwen/Qwen3-8B-AWQ}
+      --quantization awq
+      --dtype auto
+      --tensor-parallel-size 1
+      --max-model-len 8192
+      --gpu-memory-utilization 0.4
+      --enable-prefix-caching
+      --disable-log-requests
+      --port 8000
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 300s
+
+  # =============================================================================
+  # vLLM - T3 (Chatterbox Speech Token Generator)
+  # Serves the GPT2-style T3 model for text-to-speech-token generation
+  # API: OpenAI-compatible at port 8010
+  # =============================================================================
+  vllm-t3:
+    image: vllm/vllm-openai:latest
+    container_name: voice-agent-vllm-t3
+    restart: unless-stopped
+    profiles: ["t3"]  # Optional - enable with: docker compose --profile t3 up
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0"]
+              capabilities: [gpu]
+
     shm_size: "8g"
     ulimits:
       memlock: -1
       stack: 67108864
 
     ports:
-      - "8000:8000"   # HTTP
+      - "8010:8000"
+
+    volumes:
+      - ${HF_HOME:-~/.cache/huggingface}:/root/.cache/huggingface
+      - ./vllm_models/t3_turbo:/models/t3_turbo:ro
+
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+      - HF_TOKEN=${HF_TOKEN}
+
+    # T3 is ~350M params, uses less memory than Qwen3
+    command: >
+      --model /models/t3_turbo
+      --dtype float16
+      --tensor-parallel-size 1
+      --max-model-len 4096
+      --gpu-memory-utilization 0.3
+      --trust-remote-code
+      --disable-log-requests
+      --port 8000
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+
+  # =============================================================================
+  # Triton Inference Server
+  # Serves: Chatterbox non-LLM models (encoder, decoder, embeddings)
+  # If T3 profile is NOT enabled, also serves chatterbox_lm via ONNX Runtime
+  # =============================================================================
+  triton:
+    image: nvcr.io/nvidia/tritonserver:24.12-py3
+    container_name: voice-agent-triton
+    restart: unless-stopped
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0"]
+              capabilities: [gpu]
+
+    shm_size: "8g"
+    ulimits:
+      memlock: -1
+      stack: 67108864
+
+    ports:
+      - "8080:8000"   # HTTP
       - "8001:8001"   # gRPC
-      - "8002:8002"   # Metrics
+      - "8082:8002"   # Metrics
 
     volumes:
       - ./model_repository:/models
-      - ../src/cosyvoice:/opt/cosyvoice:ro
-      - ./engine_cache:/engine_cache
       - ./logs/triton:/var/log/triton
-      - ./qwen3_build:/qwen3_build
 
     environment:
       - CUDA_VISIBLE_DEVICES=0
       - TRT_LOGGER_LEVEL=WARNING
-      - PYTHONPATH=/opt
+      - VLLM_QWEN_URL=http://vllm-qwen:8000
+      - VLLM_T3_URL=http://vllm-t3:8000
 
     command: >
       tritonserver
-      --model-repository=/models/asr
-      --model-repository=/models/llm
       --model-repository=/models/tts
+      --model-repository=/models/asr
       --model-control-mode=explicit
-      --model-load-thread-count=4
       --load-model=chatterbox
-      --load-model=chatterbox_decoder
-      --load-model=chatterbox_embed
-      --load-model=chatterbox_encoder
-      --load-model=chatterbox_lm
+      --load-model=parakeet_tdt
       --disable-auto-complete-config
       --http-port=8000
       --grpc-port=8001
       --metrics-port=8002
+      --log-verbose=0
 
     healthcheck:
-        test: ["CMD", "true"]
-        interval: 30s
-        timeout: 10s
-        retries: 5
-        start_period: 1000s
+      test: ["CMD", "curl", "-f", "http://localhost:8000/v2/health/ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+
+    depends_on:
+      vllm-qwen:
+        condition: service_healthy
 
   # =============================================================================
-  # Voice Agent Inference Worker (Python WebSocket Server)
+  # Voice Agent Worker
   # =============================================================================
   worker:
     build:
@@ -89,13 +199,14 @@ services:
       - ../voice.wav:/app/voice.wav:ro
 
     environment:
+      - VLLM_URL=http://vllm-qwen:8000
+      - LLM_MODEL=${VLLM_MODEL:-Qwen/Qwen3-8B-AWQ}
       - TRITON_URL=triton:8001
-      - TRITON_HTTP_URL=http://triton:8000
-      - TTS_BACKEND=cosyvoice
-      - TTS_MODEL=cosyvoice2
+      - TRITON_HTTP_URL=http://triton:8080
+      - TTS_BACKEND=chatterbox
+      - TTS_MODEL=chatterbox
       - LOG_LEVEL=INFO
       - PYTHONUNBUFFERED=1
-      # Voice cloning settings
       - REFERENCE_AUDIO_PATH=/app/voice.wav
       - REFERENCE_TEXT=The quick brown fox jumps over the lazy dog.
 
@@ -104,18 +215,18 @@ services:
         condition: service_healthy
 
     healthcheck:
-      test: ["CMD", "true"]
+      test: ["CMD", "curl", "-f", "http://localhost:80/health"]
       interval: 10s
       timeout: 5s
       retries: 3
 
   # =============================================================================
-  # Model Builder (One-off container for building TensorRT engines)
+  # Model Builder
   # =============================================================================
   model-builder:
-    image: docker
+    image: nvcr.io/nvidia/tensorrt:24.12-py3
     container_name: voice-agent-model-builder
-    profiles: ["build"]  # Only runs with: docker compose --profile build up model-builder
+    profiles: ["build"]
 
     deploy:
       resources:
@@ -132,9 +243,10 @@ services:
 
     volumes:
       - ./model_repository:/models
-      - ./engine_cache:/engine_cache
       - ./scripts:/scripts:ro
-      - ./model_sources:/model_sources
+      - ./chatterbox_build:/chatterbox_build
+      - ./vllm_models:/vllm_models
+      - ${HF_HOME:-~/.cache/huggingface}:/root/.cache/huggingface
 
     working_dir: /scripts
 
@@ -142,8 +254,7 @@ services:
       - HF_TOKEN=${HF_TOKEN}
       - CUDA_VISIBLE_DEVICES=0
 
-    command: ["bash", "-c", "echo 'Model builder ready. Run scripts manually or use: docker exec -it voice-agent-model-builder bash'"]
-
+    command: ["bash"]
     stdin_open: true
     tty: true
 

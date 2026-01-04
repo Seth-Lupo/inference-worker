@@ -8,9 +8,10 @@ Usage:
     python run.py --host 127.0.0.1   # Bind to localhost only
 
 Environment variables:
-    TTS_BACKEND           - "mock", "cosyvoice", or "chatterbox" (default: chatterbox)
+    TTS_BACKEND           - "mock" or "chatterbox" (default: chatterbox)
     TRITON_URL            - Triton gRPC URL (default: localhost:8001)
     TTS_MODEL             - TTS model name (default: chatterbox)
+    VLLM_URL              - vLLM API URL (default: http://localhost:8000)
     REFERENCE_AUDIO_PATH  - Path to reference audio for voice cloning
     REFERENCE_TEXT        - Text spoken in reference audio
     LOG_LEVEL             - DEBUG, INFO, WARNING, ERROR (default: INFO)
@@ -46,7 +47,7 @@ def main():
     # TTS config from env vars with CLI override
     parser.add_argument(
         "--tts-backend",
-        choices=["mock", "cosyvoice", "chatterbox"],
+        choices=["mock", "chatterbox"],
         default=os.environ.get("TTS_BACKEND", "chatterbox"),
         help="TTS backend (env: TTS_BACKEND, default: chatterbox)"
     )
@@ -59,6 +60,11 @@ def main():
         "--tts-model",
         default=os.environ.get("TTS_MODEL", "chatterbox"),
         help="TTS model name (env: TTS_MODEL, default: chatterbox)"
+    )
+    parser.add_argument(
+        "--vllm-url",
+        default=os.environ.get("VLLM_URL", "http://localhost:8000"),
+        help="vLLM API URL (env: VLLM_URL, default: http://localhost:8000)"
     )
     parser.add_argument(
         "--reference-audio",
@@ -78,7 +84,7 @@ def main():
     setup_logging(log_level)
 
     tts_info = f"TTS: {args.tts_backend}"
-    if args.tts_backend == "cosyvoice":
+    if args.tts_backend == "chatterbox":
         tts_info += f" ({args.triton_url}/{args.tts_model})"
 
     voice_info = "Voice: default"
@@ -86,18 +92,19 @@ def main():
         voice_info = f"Voice: {os.path.basename(args.reference_audio)}"
 
     print(f"""
-╔═══════════════════════════════════════════════════════════════╗
-║           Voice Agent Inference Worker                        ║
-╠═══════════════════════════════════════════════════════════════╣
-║  WebSocket: ws://{args.host}:{args.port:<5}                              ║
-║  {tts_info:<61}║
-║  {voice_info:<61}║
-║                                                               ║
-║  Connect with a WebSocket client and send audio to test.     ║
-║  Audio format: PCM16, 16kHz, mono                             ║
-║                                                               ║
-║  Press Ctrl+C to stop                                         ║
-╚═══════════════════════════════════════════════════════════════╝
++---------------------------------------------------------------+
+|           Voice Agent Inference Worker                        |
++---------------------------------------------------------------+
+|  WebSocket: ws://{args.host}:{args.port:<5}                              |
+|  {tts_info:<61}|
+|  vLLM: {args.vllm_url:<55}|
+|  {voice_info:<61}|
+|                                                               |
+|  Connect with a WebSocket client and send audio to test.     |
+|  Audio format: PCM16, 16kHz, mono                             |
+|                                                               |
+|  Press Ctrl+C to stop                                         |
++---------------------------------------------------------------+
 """)
 
     try:

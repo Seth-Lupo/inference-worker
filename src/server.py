@@ -33,7 +33,7 @@ class VoiceAgentServer:
         port: int = 80,
         tts_backend: str = "mock",
         triton_url: str = "localhost:8001",
-        tts_model: str = "cosyvoice2",
+        tts_model: str = "chatterbox",
         reference_audio_path: str = None,
         reference_text: str = None,
     ):
@@ -208,7 +208,7 @@ async def run_server(
     port: int = 80,
     tts_backend: str = "mock",
     triton_url: str = "localhost:8001",
-    tts_model: str = "cosyvoice2",
+    tts_model: str = "chatterbox",
     reference_audio_path: str = None,
     reference_text: str = None,
 ) -> None:

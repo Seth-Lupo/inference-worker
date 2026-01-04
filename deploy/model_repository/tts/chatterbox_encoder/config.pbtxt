@@ -2,6 +2,9 @@ name: "chatterbox_encoder"
 platform: "onnxruntime_onnx"
 max_batch_size: 8
 
+# Speech encoder for voice conditioning from reference audio
+# Uses STFT custom op - not TensorRT compatible
+
 input [
   {
     name: "input_features"
@@ -25,7 +28,6 @@ instance_group [
   }
 ]
 
-# Use CUDA execution provider for GPU acceleration
 optimization {
   execution_accelerators {
     gpu_execution_accelerator : [

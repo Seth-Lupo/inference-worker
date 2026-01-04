@@ -6,24 +6,33 @@
 # =============================================================================
 
 # -----------------------------------------------------------------------------
-# Docker Images
+# Docker Images - MUST USE MATCHING VERSIONS
 # -----------------------------------------------------------------------------
+# TensorRT version compatibility is critical:
+# - Build and runtime containers must have the same TensorRT version
+# - Using NGC 24.12 series for all containers
 images:
   # TensorRT container for ONNX->TRT builds (trtexec)
-  tensorrt: "nvcr.io/nvidia/tensorrt:25.09-py3"
+  tensorrt: "nvcr.io/nvidia/tensorrt:24.12-py3"
 
-  # TensorRT-LLM container for LLM engine builds (must match serving container)
-  trtllm: "nvcr.io/nvidia/tritonserver:25.12-trtllm-python-py3"
+  # Triton container for serving (must match TRT version)
+  triton: "nvcr.io/nvidia/tritonserver:24.12-py3"
+
+  # vLLM container for LLM inference
+  vllm: "vllm/vllm-openai:latest"
 
 # -----------------------------------------------------------------------------
 # TensorRT Build Settings
 # -----------------------------------------------------------------------------
 tensorrt:
-  # Default workspace memory in MiB (converted to GB for trtexec)
+  # Default workspace memory in MiB
   workspace_mib: 4096
 
   # Large model workspace (flow decoder, etc.)
   large_workspace_mib: 8192
+
+  # Default precision for TRT engine builds
+  default_precision: "fp16"
 
 # -----------------------------------------------------------------------------
 # Triton Paths (as seen inside container)
@@ -33,97 +42,44 @@ triton_paths:
   base: "/models"
 
   # Model subdirectories
-  asr: "/models/asr"
-  llm: "/models/llm"
   tts: "/models/tts"
 
 # -----------------------------------------------------------------------------
-# ASR: Parakeet TDT 0.6B
+# vLLM: Qwen3 with INT4 AWQ Quantization
 # -----------------------------------------------------------------------------
-parakeet:
-  # Model source
-  hf_repo: "istupakov/parakeet-tdt-0.6b-v2-onnx"
+vllm:
+  # Model to serve (AWQ pre-quantized from HuggingFace)
+  model: "Qwen/Qwen3-8B-AWQ"
 
-  # Build settings
-  precision: "fp16"  # fp16 or fp32
+  # Quantization method (awq, gptq, or none)
+  quantization: "awq"
 
-  # Triton settings
-  max_batch_size: 8
+  # Engine settings
+  max_model_len: 8192
+  gpu_memory_utilization: 0.85
 
-  # Dynamic shapes for encoder
-  shapes:
-    encoder:
-      min: "audio_signal:1x128x10,length:1"
-      opt: "audio_signal:1x128x1000,length:1"
-      max: "audio_signal:1x128x3000,length:1"
+  # Optimization
+  enable_prefix_caching: true
+  tensor_parallel_size: 1
 
-# -----------------------------------------------------------------------------
-# LLM: Qwen3 8B
-# -----------------------------------------------------------------------------
-qwen3:
-  # Model source
-  hf_model: "Qwen/Qwen3-8B"
-  model_dir_name: "Qwen3-8B"
-
-  # Quantization: none, fp8, int8_sq, int4_awq, int4
-  quantization: "int4"
-
-  # Engine build parameters
-  max_batch_size: 8
-  max_input_len: 4096
-  max_seq_len: 8192
-
-  # KV cache settings
-  kv_cache_free_gpu_mem_fraction: 0.5
-
-  # Triton paths (inside container)
-  engine_path: "/models/llm/qwen3_8b/1/engine"
-  tokenizer_path: "/models/llm/qwen3_8b/1/tokenizer"
+  # API settings
+  port: 8000
+  api_key: ""  # Optional, leave empty for no auth
 
 # -----------------------------------------------------------------------------
-# TTS: CosyVoice 2
+# TTS: Chatterbox Turbo (350M, TensorRT + ONNX Runtime)
 # -----------------------------------------------------------------------------
-cosyvoice:
-  # Model sources
-  hf_model: "yuekai/cosyvoice2_llm"
-  modelscope_model: "iic/CosyVoice2-0.5B"
-
-  # TensorRT-LLM dtype: bfloat16, float16
-  trt_dtype: "bfloat16"
-
-  # Triton settings
-  max_batch_size: 16
-  bls_instance_count: 4
-  decoupled_mode: true
-
-  # Triton paths (inside container)
-  assets_path: "/models/tts/assets"
-  llm_tokenizer_path: "/models/tts/assets/cosyvoice2_llm"
-  trtllm_engine_path: "/models/tts/tensorrt_llm/1/engine"
-
-  # Dynamic shapes for audio processing
-  shapes:
-    speech_tokenizer:
-      min: "feats:1x128x10"
-      opt: "feats:1x128x500"
-      max: "feats:1x128x3000"
-    campplus:
-      min: "input:1x4x80"
-      opt: "input:1x500x80"
-      max: "input:1x3000x80"
-    flow_decoder:
-      min: "x:2x80x4,mask:2x1x4,mu:2x80x4,cond:2x80x4"
-      opt: "x:2x80x500,mask:2x1x500,mu:2x80x500,cond:2x80x500"
-      max: "x:2x80x3000,mask:2x1x3000,mu:2x80x3000,cond:2x80x3000"
-
-# -----------------------------------------------------------------------------
-# TTS: Chatterbox Turbo (350M, TensorRT-accelerated)
+# Architecture:
+# - embed_tokens: TensorRT (simple embedding layer)
+# - language_model: ONNX Runtime (complex KV cache operations)
+# - speech_encoder: ONNX Runtime (STFT custom op - not TRT compatible)
+# - conditional_decoder: ONNX Runtime (MultiHeadAttention custom op)
 # -----------------------------------------------------------------------------
 chatterbox:
   # Model source (ONNX exports from HuggingFace)
   hf_repo: "ResembleAI/chatterbox-turbo-ONNX"
 
-  # Precision for TensorRT engines: fp16 or fp32
+  # Precision for models: fp16 or fp32
   precision: "fp16"
 
   # Native sample rate
@@ -144,21 +100,18 @@ chatterbox:
   # Triton paths (inside container)
   assets_path: "/models/tts/chatterbox_assets"
 
-  # Dynamic shapes for each component
+  # Model-specific backends
+  # TensorRT: embed_tokens (simple ops)
+  # ONNX Runtime: everything else (custom ops not supported by TRT)
+  backends:
+    embed_tokens: "tensorrt"      # Simple embedding - TRT works
+    language_model: "onnxruntime" # Complex KV cache - keep as ONNX
+    speech_encoder: "onnxruntime" # STFT op not supported by TRT
+    conditional_decoder: "onnxruntime" # MultiHeadAttention not supported
+
+  # Dynamic shapes for TensorRT engine builds
   shapes:
     embed_tokens:
       min: "input_ids:1x1"
       opt: "input_ids:4x256"
       max: "input_ids:8x1024"
-    language_model:
-      min: "inputs_embeds:1x1x896,attention_mask:1x1,position_ids:1x1"
-      opt: "inputs_embeds:4x256x896,attention_mask:4x256,position_ids:4x256"
-      max: "inputs_embeds:8x1024x896,attention_mask:8x1024,position_ids:8x1024"
-    speech_encoder:
-      min: "input_features:1x1x80"
-      opt: "input_features:1x500x80"
-      max: "input_features:1x3000x80"
-    conditional_decoder:
-      min: "input_ids:1x1"
-      opt: "input_ids:1x256"
-      max: "input_ids:1x1024"

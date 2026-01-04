@@ -5,7 +5,7 @@ Provides connection management and inference methods for decoupled models.
 
 Features:
 - Async gRPC connection management
-- Streaming inference for decoupled models (like CosyVoice2)
+- Streaming inference for decoupled models (like Chatterbox TTS)
 - Cancel event support for barge-in
 """
 import asyncio

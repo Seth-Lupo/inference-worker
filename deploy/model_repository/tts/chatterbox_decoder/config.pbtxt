@@ -2,6 +2,9 @@ name: "chatterbox_decoder"
 platform: "onnxruntime_onnx"
 max_batch_size: 8
 
+# Conditional decoder: speech tokens -> mel spectrogram
+# Uses MultiHeadAttention from com.microsoft domain - not TensorRT compatible
+
 input [
   {
     name: "input_ids"
