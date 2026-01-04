@@ -152,26 +152,41 @@ stage_download_models() {
     ensure_git_lfs || return 1
 
     # Clone the repository with LFS
-    if [[ -d "$clone_dir" ]]; then
+    local git_url="https://huggingface.co/${HF_REPO}"
+    if [[ -n "${HF_TOKEN:-}" ]]; then
+        git_url="https://USER:${HF_TOKEN}@huggingface.co/${HF_REPO}"
+    fi
+
+    if [[ -d "$clone_dir/.git" ]]; then
         log_info "Repository already cloned, pulling LFS files..."
-        (cd "$clone_dir" && git lfs pull)
+        (cd "$clone_dir" && git lfs pull --include="onnx/*" && git restore --source=HEAD :/ 2>/dev/null || true)
     else
         log_info "Cloning ${HF_REPO} with git-lfs..."
 
-        local git_url="https://huggingface.co/${HF_REPO}"
-        if [[ -n "${HF_TOKEN:-}" ]]; then
-            git_url="https://USER:${HF_TOKEN}@huggingface.co/${HF_REPO}"
-        fi
+        # Remove partial clone if exists
+        rm -rf "$clone_dir"
 
-        # Clone with LFS enabled
-        GIT_LFS_SKIP_SMUDGE=0 git clone --depth 1 "$git_url" "$clone_dir" || {
+        # First clone without LFS to avoid checkout issues with large files
+        GIT_LFS_SKIP_SMUDGE=1 git clone --depth 1 "$git_url" "$clone_dir" || {
             log_error "Failed to clone repository"
             return 1
         }
 
-        # Ensure LFS files are pulled
-        log_info "Pulling LFS files..."
-        (cd "$clone_dir" && git lfs pull) || {
+        # Now pull only the ONNX files we need (based on precision)
+        log_info "Pulling LFS files for ${PRECISION} precision..."
+        (
+            cd "$clone_dir"
+
+            # Pull specific files based on precision
+            if [[ "$PRECISION" == "fp16" ]]; then
+                git lfs pull --include="onnx/*_fp16.onnx,onnx/*_fp16.onnx_data"
+            else
+                git lfs pull --include="onnx/embed_tokens.onnx,onnx/embed_tokens.onnx_data,onnx/language_model.onnx,onnx/language_model.onnx_data,onnx/speech_encoder.onnx,onnx/speech_encoder.onnx_data,onnx/conditional_decoder.onnx,onnx/conditional_decoder.onnx_data"
+            fi
+
+            # Also pull config files (small, not LFS)
+            git lfs pull --include="*.json"
+        ) || {
             log_error "Failed to pull LFS files"
             return 1
         }
