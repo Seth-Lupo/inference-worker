@@ -208,12 +208,19 @@ download_assets() {
 
     mkdir -p "$ASSETS_DIR"
 
-    local files=("s3gen.safetensors" "ve.safetensors" "conds.pt")
+    # Required files with minimum size thresholds (bytes)
+    # s3gen.safetensors: ~900MB, ve.safetensors: ~8MB
+    declare -A required_files=(
+        ["s3gen.safetensors"]=100000000   # 100MB min
+        ["ve.safetensors"]=1000000        # 1MB min
+    )
+    # Optional files (nice to have but not critical)
+    local optional_files=("conds.pt")
 
     # Check if already downloaded
     local all_exist=true
-    for file in "${files[@]}"; do
-        if ! is_real_file "${ASSETS_DIR}/${file}" 1000000; then
+    for file in "${!required_files[@]}"; do
+        if ! is_real_file "${ASSETS_DIR}/${file}" "${required_files[$file]}"; then
             all_exist=false
             break
         fi
@@ -231,13 +238,21 @@ download_assets() {
             }
         fi
 
-        # Copy asset files
-        for file in "${files[@]}"; do
+        # Copy required files
+        for file in "${!required_files[@]}"; do
             if [[ -f "${WORK_DIR}/chatterbox/${file}" ]]; then
                 cp "${WORK_DIR}/chatterbox/${file}" "$ASSETS_DIR/"
                 log_info "  ✓ ${file}"
             else
                 log_warn "  ✗ ${file} not found in repo"
+            fi
+        done
+
+        # Copy optional files
+        for file in "${optional_files[@]}"; do
+            if [[ -f "${WORK_DIR}/chatterbox/${file}" ]]; then
+                cp "${WORK_DIR}/chatterbox/${file}" "$ASSETS_DIR/"
+                log_info "  ✓ ${file} (optional)"
             fi
         done
     fi
@@ -248,19 +263,28 @@ download_assets() {
         log_info "Copied tokenizer.json to assets"
     fi
 
-    # Verify
+    # Verify required files
     local missing=0
-    for file in "${files[@]}"; do
-        if is_real_file "${ASSETS_DIR}/${file}" 1000000; then
+    for file in "${!required_files[@]}"; do
+        if is_real_file "${ASSETS_DIR}/${file}" "${required_files[$file]}"; then
             log_info "  ✓ ${file}"
         else
-            log_warn "  ✗ ${file} MISSING"
+            log_warn "  ✗ ${file} MISSING or too small"
             ((missing++))
         fi
     done
 
+    # Check optional files (just info, not failure)
+    for file in "${optional_files[@]}"; do
+        if [[ -f "${ASSETS_DIR}/${file}" ]]; then
+            log_info "  ✓ ${file} (optional)"
+        else
+            log_info "  - ${file} not present (optional)"
+        fi
+    done
+
     if [[ $missing -gt 0 ]]; then
-        log_error "Missing ${missing} asset files"
+        log_error "Missing ${missing} required asset files"
         return 1
     fi
 
