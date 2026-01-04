@@ -39,9 +39,14 @@ fi
 # -----------------------------------------------------------------------------
 log_info "Installing Docker Compose + Buildx..."
 
-ARCH=$(uname -m)
-[ "$ARCH" = "x86_64" ] && ARCH=amd64
-[ "$ARCH" = "aarch64" ] && ARCH=arm64
+# Architecture mapping
+UNAME_ARCH=$(uname -m)
+# Docker Compose uses x86_64/aarch64
+COMPOSE_ARCH="$UNAME_ARCH"
+# Buildx uses amd64/arm64
+BUILDX_ARCH="$UNAME_ARCH"
+[ "$BUILDX_ARCH" = "x86_64" ] && BUILDX_ARCH=amd64
+[ "$BUILDX_ARCH" = "aarch64" ] && BUILDX_ARCH=arm64
 
 PLUGIN_DIR="/usr/local/lib/docker/cli-plugins"
 sudo mkdir -p "$PLUGIN_DIR"
@@ -49,7 +54,7 @@ sudo mkdir -p "$PLUGIN_DIR"
 # ---- Compose ----
 if ! docker compose version &>/dev/null; then
   sudo curl -fL \
-    https://github.com/docker/compose/releases/latest/download/docker-compose-linux-${ARCH} \
+    "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-${COMPOSE_ARCH}" \
     -o "$PLUGIN_DIR/docker-compose"
   sudo chmod +x "$PLUGIN_DIR/docker-compose"
 fi
@@ -59,7 +64,7 @@ REQUIRED_BUILDX="0.17.1"
 if ! docker buildx version &>/dev/null || \
    ! docker buildx version | grep -q "$REQUIRED_BUILDX"; then
   sudo curl -fL \
-    https://github.com/docker/buildx/releases/download/v${REQUIRED_BUILDX}/buildx-v${REQUIRED_BUILDX}.linux-${ARCH} \
+    "https://github.com/docker/buildx/releases/download/v${REQUIRED_BUILDX}/buildx-v${REQUIRED_BUILDX}.linux-${BUILDX_ARCH}" \
     -o "$PLUGIN_DIR/docker-buildx"
   sudo chmod +x "$PLUGIN_DIR/docker-buildx"
   file "$PLUGIN_DIR/docker-buildx" | grep -q ELF || exit 1
