@@ -34,20 +34,35 @@ class TritonPythonModel:
             raise FileNotFoundError(f"ONNX model not found: {onnx_path}")
 
         # Create ONNX Runtime session with CUDA EP
-        # Use small memory limit to coexist with vLLM
+        # Minimal memory footprint to coexist with PyTorch models loading in parallel
         providers = [
             ('CUDAExecutionProvider', {
                 'device_id': 0,
                 'arena_extend_strategy': 'kSameAsRequested',
-                'gpu_mem_limit': 512 * 1024 * 1024,  # 512MB
+                'gpu_mem_limit': 256 * 1024 * 1024,  # 256MB
+                'cudnn_conv_use_max_workspace': False,
+                'do_copy_in_default_stream': True,
             }),
             'CPUExecutionProvider'
         ]
 
         sess_options = ort.SessionOptions()
-        sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_BASIC
+        sess_options.enable_mem_reuse = True
 
-        self.session = ort.InferenceSession(onnx_path, sess_options, providers=providers)
+        # Retry with delay to handle GPU memory contention during parallel model loading
+        import time
+        max_retries = 5
+        for attempt in range(max_retries):
+            try:
+                self.session = ort.InferenceSession(onnx_path, sess_options, providers=providers)
+                break
+            except Exception as e:
+                if attempt < max_retries - 1 and "memory" in str(e).lower():
+                    pb_utils.Logger.log_info(f"Parakeet Encoder: GPU memory contention, retry {attempt + 1}/{max_retries}")
+                    time.sleep(2)
+                else:
+                    raise
 
         # Log model info
         pb_utils.Logger.log_info(f"Parakeet Encoder: Providers = {self.session.get_providers()}")
