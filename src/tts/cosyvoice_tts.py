@@ -5,7 +5,9 @@ Streaming text-to-speech with interrupt support for barge-in.
 
 Model inputs:
 - target_text: Text to synthesize (required)
-- stream: Enable streaming output (default: True)
+- reference_wav: Reference audio for voice cloning (optional)
+- reference_wav_len: Length of reference audio (optional)
+- reference_text: Text spoken in reference audio (optional)
 
 Model outputs:
 - waveform: Float32 audio samples at 22050Hz
@@ -13,13 +15,26 @@ Model outputs:
 import asyncio
 import logging
 import time
-from dataclasses import dataclass
+import os
+from dataclasses import dataclass, field
 from typing import AsyncIterator, Optional
 import numpy as np
 
 from ..triton_client import TritonClient, TritonConfig
 
 logger = logging.getLogger(__name__)
+
+
+def load_reference_audio(path: str) -> tuple[np.ndarray, int]:
+    """Load reference audio file as float32 samples at 16kHz."""
+    import wave
+    with wave.open(path, 'rb') as wf:
+        assert wf.getnchannels() == 1, "Reference audio must be mono"
+        assert wf.getsampwidth() == 2, "Reference audio must be 16-bit"
+        assert wf.getframerate() == 16000, "Reference audio must be 16kHz"
+        frames = wf.readframes(wf.getnframes())
+        samples = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
+        return samples, len(samples)
 
 
 @dataclass
@@ -36,6 +51,9 @@ class TTSConfig:
     sample_rate: int = 22050      # Native CosyVoice output rate
     output_rate: int = 16000      # Target output rate (resampled)
     streaming: bool = True        # Use streaming inference
+    # Voice cloning settings
+    reference_audio_path: Optional[str] = None  # Path to reference .wav file
+    reference_text: Optional[str] = None        # Text spoken in reference audio
 
 
 class CosyVoiceTTS:
@@ -65,6 +83,21 @@ class CosyVoiceTTS:
 
         # Resampling ratio
         self._resample_ratio = self._config.output_rate / self._config.sample_rate
+
+        # Load reference audio for voice cloning
+        self._reference_wav: Optional[np.ndarray] = None
+        self._reference_wav_len: Optional[int] = None
+        if self._config.reference_audio_path:
+            if os.path.exists(self._config.reference_audio_path):
+                self._reference_wav, self._reference_wav_len = load_reference_audio(
+                    self._config.reference_audio_path
+                )
+                logger.info(
+                    f"CosyVoice: Loaded reference audio from {self._config.reference_audio_path} "
+                    f"({self._reference_wav_len} samples, {self._reference_wav_len/16000:.2f}s)"
+                )
+            else:
+                logger.warning(f"CosyVoice: Reference audio not found: {self._config.reference_audio_path}")
 
     @property
     def is_speaking(self) -> bool:
@@ -109,7 +142,14 @@ class CosyVoiceTTS:
                 "target_text": np.array([[text]], dtype=object),
             }
 
-            logger.debug(f"CosyVoice: Inputs - target_text shape={inputs['target_text'].shape}")
+            # Add reference audio for voice cloning if configured
+            if self._reference_wav is not None and self._config.reference_text:
+                inputs["reference_wav"] = self._reference_wav.reshape(1, -1)
+                inputs["reference_wav_len"] = np.array([[self._reference_wav_len]], dtype=np.int32)
+                inputs["reference_text"] = np.array([[self._config.reference_text]], dtype=object)
+                logger.debug(f"CosyVoice: Using voice cloning with {self._reference_wav_len} samples")
+
+            logger.debug(f"CosyVoice: Inputs - {list(inputs.keys())}")
 
             # Stream inference
             first_chunk = True

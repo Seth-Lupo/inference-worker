@@ -88,6 +88,7 @@ services:
     volumes:
       - ../src:/app/src
       - ./logs/worker:/app/logs
+      - ../voice.wav:/app/voice.wav:ro
 
     environment:
       - TRITON_URL=triton:8001
@@ -96,6 +97,9 @@ services:
       - TTS_MODEL=cosyvoice2
       - LOG_LEVEL=INFO
       - PYTHONUNBUFFERED=1
+      # Voice cloning settings
+      - REFERENCE_AUDIO_PATH=/app/voice.wav
+      - REFERENCE_TEXT=The quick brown fox jumps over the lazy dog.
 
     depends_on:
       triton:

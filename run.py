@@ -8,10 +8,12 @@ Usage:
     python run.py --host 127.0.0.1   # Bind to localhost only
 
 Environment variables:
-    TTS_BACKEND     - "mock" or "cosyvoice" (default: cosyvoice)
-    TRITON_URL      - Triton gRPC URL (default: localhost:8001)
-    TTS_MODEL       - TTS model name (default: cosyvoice2)
-    LOG_LEVEL       - DEBUG, INFO, WARNING, ERROR (default: INFO)
+    TTS_BACKEND           - "mock" or "cosyvoice" (default: cosyvoice)
+    TRITON_URL            - Triton gRPC URL (default: localhost:8001)
+    TTS_MODEL             - TTS model name (default: cosyvoice2)
+    REFERENCE_AUDIO_PATH  - Path to reference audio for voice cloning
+    REFERENCE_TEXT        - Text spoken in reference audio
+    LOG_LEVEL             - DEBUG, INFO, WARNING, ERROR (default: INFO)
 """
 import argparse
 import asyncio
@@ -58,6 +60,16 @@ def main():
         default=os.environ.get("TTS_MODEL", "cosyvoice2"),
         help="TTS model name (env: TTS_MODEL, default: cosyvoice2)"
     )
+    parser.add_argument(
+        "--reference-audio",
+        default=os.environ.get("REFERENCE_AUDIO_PATH"),
+        help="Path to reference audio for voice cloning (env: REFERENCE_AUDIO_PATH)"
+    )
+    parser.add_argument(
+        "--reference-text",
+        default=os.environ.get("REFERENCE_TEXT"),
+        help="Text spoken in reference audio (env: REFERENCE_TEXT)"
+    )
 
     args = parser.parse_args()
 
@@ -69,12 +81,17 @@ def main():
     if args.tts_backend == "cosyvoice":
         tts_info += f" ({args.triton_url}/{args.tts_model})"
 
+    voice_info = "Voice: default"
+    if args.reference_audio:
+        voice_info = f"Voice: {os.path.basename(args.reference_audio)}"
+
     print(f"""
 ╔═══════════════════════════════════════════════════════════════╗
 ║           Voice Agent Inference Worker                        ║
 ╠═══════════════════════════════════════════════════════════════╣
 ║  WebSocket: ws://{args.host}:{args.port:<5}                              ║
 ║  {tts_info:<61}║
+║  {voice_info:<61}║
 ║                                                               ║
 ║  Connect with a WebSocket client and send audio to test.     ║
 ║  Audio format: PCM16, 16kHz, mono                             ║
@@ -90,6 +107,8 @@ def main():
             tts_backend=args.tts_backend,
             triton_url=args.triton_url,
             tts_model=args.tts_model,
+            reference_audio_path=args.reference_audio,
+            reference_text=args.reference_text,
         ))
     except KeyboardInterrupt:
         print("\nShutting down...")

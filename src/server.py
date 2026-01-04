@@ -34,15 +34,21 @@ class VoiceAgentServer:
         tts_backend: str = "mock",
         triton_url: str = "localhost:8001",
         tts_model: str = "cosyvoice2",
+        reference_audio_path: str = None,
+        reference_text: str = None,
     ):
         self.host = host
         self.port = port
         self._tts_backend = TTSBackend(tts_backend)
         self._triton_url = triton_url
         self._tts_model = tts_model
+        self._reference_audio_path = reference_audio_path
+        self._reference_text = reference_text
         self._sessions: Dict[str, AgentRail] = {}
         self._server = None
         logger.debug(f"VoiceAgentServer created: {host}:{port}, TTS: {tts_backend}")
+        if reference_audio_path:
+            logger.info(f"Voice cloning enabled: {reference_audio_path}")
 
     async def start(self) -> None:
         """Start the WebSocket server."""
@@ -81,6 +87,8 @@ class VoiceAgentServer:
             backend=self._tts_backend,
             triton_url=self._triton_url,
             model_name=self._tts_model,
+            reference_audio_path=self._reference_audio_path,
+            reference_text=self._reference_text,
         )
 
         # Create agent rail for this session
@@ -201,6 +209,8 @@ async def run_server(
     tts_backend: str = "mock",
     triton_url: str = "localhost:8001",
     tts_model: str = "cosyvoice2",
+    reference_audio_path: str = None,
+    reference_text: str = None,
 ) -> None:
     """Run the voice agent server."""
     logger.info(f"Starting voice agent server on {host}:{port}")
@@ -210,6 +220,8 @@ async def run_server(
         tts_backend=tts_backend,
         triton_url=triton_url,
         tts_model=tts_model,
+        reference_audio_path=reference_audio_path,
+        reference_text=reference_text,
     )
     await server.start()
 

@@ -110,9 +110,16 @@ class CosyVoiceTTSRail(BaseTTSRail):
 
     Streams audio chunks as they're generated for low latency.
     Supports interrupt for barge-in.
+    Supports voice cloning via reference audio.
     """
 
-    def __init__(self, triton_url: str = "localhost:8001", model_name: str = "cosyvoice2"):
+    def __init__(
+        self,
+        triton_url: str = "localhost:8001",
+        model_name: str = "cosyvoice2",
+        reference_audio_path: str = None,
+        reference_text: str = None,
+    ):
         from .triton_client import TritonClient, TritonConfig
         from .tts.cosyvoice_tts import CosyVoiceTTS, TTSConfig
 
@@ -120,10 +127,19 @@ class CosyVoiceTTSRail(BaseTTSRail):
         host, port = triton_url.rsplit(":", 1) if ":" in triton_url else (triton_url, "8001")
 
         logger.info(f"CosyVoiceTTSRail: connecting to {host}:{port}, model={model_name}")
+        if reference_audio_path:
+            logger.info(f"CosyVoiceTTSRail: using voice cloning from {reference_audio_path}")
 
         # Create client
         self._client = TritonClient(TritonConfig(host=host, port=int(port)))
-        self._tts = CosyVoiceTTS(self._client, TTSConfig(model_name=model_name))
+        self._tts = CosyVoiceTTS(
+            self._client,
+            TTSConfig(
+                model_name=model_name,
+                reference_audio_path=reference_audio_path,
+                reference_text=reference_text,
+            )
+        )
         self._connected = False
         self._triton_url = triton_url
         self._model_name = model_name
@@ -214,6 +230,8 @@ def create_tts_rail(
     backend: TTSBackend = TTSBackend.MOCK,
     triton_url: str = "localhost:8001",
     model_name: str = "cosyvoice2",
+    reference_audio_path: str = None,
+    reference_text: str = None,
 ) -> BaseTTSRail:
     """
     Factory to create TTS rail.
@@ -222,6 +240,8 @@ def create_tts_rail(
         backend: Which backend to use
         triton_url: Triton URL (for CosyVoice)
         model_name: Model name (for CosyVoice)
+        reference_audio_path: Path to reference audio for voice cloning
+        reference_text: Text spoken in reference audio
     """
     if backend == TTSBackend.MOCK:
         logger.info("Using MockTTSRail")
@@ -229,7 +249,12 @@ def create_tts_rail(
 
     elif backend == TTSBackend.COSYVOICE:
         logger.info(f"Using CosyVoiceTTSRail: {triton_url}/{model_name}")
-        return CosyVoiceTTSRail(triton_url=triton_url, model_name=model_name)
+        return CosyVoiceTTSRail(
+            triton_url=triton_url,
+            model_name=model_name,
+            reference_audio_path=reference_audio_path,
+            reference_text=reference_text,
+        )
 
     raise ValueError(f"Unknown backend: {backend}")
 

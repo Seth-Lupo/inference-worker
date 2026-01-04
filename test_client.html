@@ -411,30 +411,27 @@
 
                 log(`🔊 Audio: ${int16.length} samples, range=[${minVal}, ${maxVal}]`, 'info');
 
-                // Check if audio is silent
+                // Check if audio is silent - still schedule it to maintain timing
                 if (maxVal === 0 && minVal === 0) {
-                    log('⚠️ Audio is all zeros!', 'error');
-                    return;
+                    log('⚠️ Audio is all zeros (still scheduling for timing)', 'info');
                 }
 
                 // Create audio buffer at audioContext's actual sample rate
                 const audioBuffer = audioContext.createBuffer(1, float32.length, 16000);
                 audioBuffer.copyToChannel(float32, 0);
 
-                // Schedule playback to avoid gaps/overlaps
+                // IMMEDIATE playback - don't wait, play NOW
                 const currentTime = audioContext.currentTime;
-                if (nextPlayTime < currentTime) {
-                    nextPlayTime = currentTime;
-                }
+                const startTime = Math.max(nextPlayTime, currentTime);
 
-                // Play
+                // Play immediately
                 const source = audioContext.createBufferSource();
                 source.buffer = audioBuffer;
                 source.connect(audioContext.destination);
-                source.start(nextPlayTime);
+                source.start(startTime);
 
-                // Schedule next chunk after this one
-                nextPlayTime += audioBuffer.duration;
+                // Schedule next chunk right after this one
+                nextPlayTime = startTime + audioBuffer.duration;
 
             } catch (error) {
                 log(`Audio playback error: ${error.message}`, 'error');
