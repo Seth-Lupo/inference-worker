@@ -462,11 +462,30 @@ class TritonPythonModel:
                     else:
                         time.sleep(0.02)
 
-                this_tts_speech_token = torch.tensor(semantic_token_ids_arr).unsqueeze(dim=0).to(torch.int32).to(self.device)
-                sub_tts_speech = self.forward_token2wav(this_tts_speech_token, token2wav_request_id, prompt_speech_tokens, prompt_speech_feat, prompt_spk_embedding, token_offset, True)
-                audio_tensor = pb_utils.Tensor.from_dlpack("waveform", to_dlpack(sub_tts_speech))
-                inference_response = pb_utils.InferenceResponse(output_tensors=[audio_tensor])
-                response_sender.send(inference_response)
+                # Process remaining tokens in chunks (same size limit applies)
+                # Only set finalize=True on the very last chunk
+                total_tokens = len(semantic_token_ids_arr)
+                while token_offset < total_tokens:
+                    remaining = total_tokens - token_offset
+                    # Use token_hop_len for chunk size, but include all remaining for last chunk
+                    chunk_size = min(self.token_hop_len, remaining)
+                    is_last_chunk = (token_offset + chunk_size >= total_tokens)
+
+                    this_tts_speech_token = torch.tensor(
+                        semantic_token_ids_arr[:token_offset + chunk_size]
+                    ).unsqueeze(dim=0).to(torch.int32).to(self.device)
+
+                    sub_tts_speech = self.forward_token2wav(
+                        this_tts_speech_token, token2wav_request_id, prompt_speech_tokens,
+                        prompt_speech_feat, prompt_spk_embedding, token_offset, is_last_chunk
+                    )
+
+                    audio_tensor = pb_utils.Tensor.from_dlpack("waveform", to_dlpack(sub_tts_speech))
+                    inference_response = pb_utils.InferenceResponse(output_tensors=[audio_tensor])
+                    response_sender.send(inference_response)
+
+                    token_offset += chunk_size
+                    self.logger.log_info(f"finalize chunk: offset={token_offset}, is_last={is_last_chunk}")
 
                 llm_thread.join()
                 response_sender.send(flags=pb_utils.TRITONSERVER_RESPONSE_COMPLETE_FINAL)
