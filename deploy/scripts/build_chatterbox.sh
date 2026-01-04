@@ -330,6 +330,110 @@ build_trt_vocoder() {
 }
 
 # =============================================================================
+# Stage 3b: Build TensorRT Flow Decoder (Optional - Unrolled Diffusion)
+# =============================================================================
+build_trt_flow_decoder() {
+    # Check if enabled in config
+    local flow_trt_enabled
+    flow_trt_enabled=$(cfg_get 's3gen.flow_decoder_trt' 'false')
+
+    if [[ "$flow_trt_enabled" != "true" ]] && [[ "${BUILD_FLOW_TRT:-}" != "true" ]]; then
+        log_info "Flow decoder TRT disabled (set s3gen.flow_decoder_trt: true in config.yaml)"
+        return 0
+    fi
+
+    log_step "Building TensorRT flow decoder (unrolled diffusion)..."
+
+    # Get diffusion steps from config
+    local num_steps
+    num_steps=$(cfg_get 's3gen.diffusion_steps_trt' '4')
+    log_info "Diffusion steps: ${num_steps}"
+
+    local onnx_dir="${WORK_DIR}/onnx"
+    local onnx_file="flow_decoder_${num_steps}steps_fp16.onnx"
+    local engine_file="${TRT_ENGINE_DIR}/flow_decoder_${num_steps}steps.engine"
+
+    mkdir -p "$onnx_dir"
+    mkdir -p "$TRT_ENGINE_DIR"
+
+    # Check if engine already exists
+    if [[ -f "$engine_file" ]]; then
+        log_info "Flow decoder TRT engine already exists: $engine_file"
+        return 0
+    fi
+
+    # Check if ONNX already exists
+    if [[ ! -f "${onnx_dir}/${onnx_file}" ]]; then
+        log_info "Exporting unrolled flow decoder to ONNX..."
+
+        # Find Python with torch
+        local python_cmd="python3"
+        [[ -x "${CONDA_PREFIX:-/opt/conda}/bin/python" ]] && python_cmd="${CONDA_PREFIX:-/opt/conda}/bin/python"
+
+        # Check if we have the assets
+        if [[ ! -f "${ASSETS_DIR}/s3gen.safetensors" ]]; then
+            log_error "S3Gen weights not found - cannot export flow decoder"
+            log_error "Run download_assets first"
+            return 1
+        fi
+
+        # Export ONNX with unrolled diffusion steps
+        $python_cmd "${SCRIPT_DIR}/export_flow_decoder.py" \
+            --assets-dir "${ASSETS_DIR}" \
+            --output-dir "${onnx_dir}" \
+            --steps "${num_steps}" \
+            --fp16 || {
+            log_warn "Flow decoder ONNX export failed"
+            log_warn "This is expected if S3Gen model class is not available"
+            log_warn "Using PyTorch flow decoder instead"
+            return 0
+        }
+    fi
+
+    # Verify ONNX exists
+    if [[ ! -f "${onnx_dir}/${onnx_file}" ]]; then
+        log_warn "Flow decoder ONNX not found - skipping TRT build"
+        return 0
+    fi
+
+    # Get shapes from config (comma-separated for multiple inputs)
+    local min_shapes opt_shapes max_shapes
+    min_shapes=$(cfg_get 's3gen.flow_decoder_shapes.min' 'latents:1x128x16,speaker_embedding:1x256,speech_token_embedding:1x4x1024')
+    opt_shapes=$(cfg_get 's3gen.flow_decoder_shapes.opt' 'latents:1x128x64,speaker_embedding:1x256,speech_token_embedding:1x32x1024')
+    max_shapes=$(cfg_get 's3gen.flow_decoder_shapes.max' 'latents:1x128x256,speaker_embedding:1x256,speech_token_embedding:1x128x1024')
+
+    # Build TensorRT engine
+    log_info "Building TensorRT engine for flow decoder..."
+    log_info "  Min shapes: ${min_shapes}"
+    log_info "  Opt shapes: ${opt_shapes}"
+    log_info "  Max shapes: ${max_shapes}"
+
+    build_trt_engine \
+        "${onnx_dir}/${onnx_file}" \
+        "${engine_file}" \
+        "--fp16" \
+        "--minShapes=${min_shapes}" \
+        "--optShapes=${opt_shapes}" \
+        "--maxShapes=${max_shapes}" || {
+        log_warn "Flow decoder TRT build failed - will use PyTorch"
+        return 0
+    }
+
+    # Save metadata for Python backend
+    cat > "${TRT_ENGINE_DIR}/flow_decoder_config.json" << EOF
+{
+    "engine_file": "flow_decoder_${num_steps}steps.engine",
+    "num_steps": ${num_steps},
+    "precision": "fp16",
+    "input_names": ["latents", "speaker_embedding", "speech_token_embedding"],
+    "output_names": ["mel_spectrogram"]
+}
+EOF
+
+    log_info "Flow decoder TRT built: ${engine_file}"
+}
+
+# =============================================================================
 # Stage 4: Compile Voice Conditioning
 # =============================================================================
 compile_voices() {
@@ -530,9 +634,13 @@ show_summary() {
     echo "  Location: ${ASSETS_DIR}"
     ls -lh "${ASSETS_DIR}"/*.safetensors 2>/dev/null | head -3
     echo ""
-    if [[ -f "${TRT_ENGINE_DIR}/conditional_decoder.engine" ]]; then
-        echo "TRT Vocoder:"
+    if [[ -d "${TRT_ENGINE_DIR}" ]] && ls "${TRT_ENGINE_DIR}"/*.engine &>/dev/null; then
+        echo "TRT Engines:"
         ls -lh "${TRT_ENGINE_DIR}"/*.engine
+        if [[ -f "${TRT_ENGINE_DIR}/flow_decoder_config.json" ]]; then
+            echo "  Flow decoder config:"
+            cat "${TRT_ENGINE_DIR}/flow_decoder_config.json"
+        fi
         echo ""
     fi
     echo "Voices:"
@@ -555,6 +663,7 @@ main() {
     download_t3
     download_assets
     build_trt_vocoder
+    build_trt_flow_decoder
     compile_voices
     create_triton_configs
     show_summary

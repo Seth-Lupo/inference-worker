@@ -127,8 +127,10 @@ s3gen:
 
   # Flow decoder TRT (optional - unrolled N steps)
   # Set to true to build TRT engine with fixed diffusion_steps_trt
-  flow_decoder_trt: false     # Not yet implemented
+  # This bakes N diffusion steps into a single TRT engine call
+  flow_decoder_trt: false
   flow_decoder_shapes:
-    min: "latents:1x256x16"
-    opt: "latents:1x256x64"
-    max: "latents:1x256x128"
+    # Shapes for dynamic axes: latents, speaker_embedding, speech_token_embedding
+    min: "latents:1x128x16,speaker_embedding:1x256,speech_token_embedding:1x4x1024"
+    opt: "latents:1x128x64,speaker_embedding:1x256,speech_token_embedding:1x32x1024"
+    max: "latents:1x128x256,speaker_embedding:1x256,speech_token_embedding:1x128x1024"
