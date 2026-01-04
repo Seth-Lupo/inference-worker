@@ -37,7 +37,7 @@ RUN pip install --no-cache-dir --force-reinstall numpy
 RUN pip install --no-cache-dir tritonclient[grpc]
 
 # Install vLLM 0.8.1 (matches NVIDIA 25.04 container API that T3 code expects)
-RUN pip install --no-cache-dir vllm==0.8.1
+RUN pip install --no-cache-dir vllm
 
 # Install vLLM backend for Triton (r25.04 branch matches vLLM 0.8.1)
 RUN mkdir -p /opt/tritonserver/backends/vllm && \
