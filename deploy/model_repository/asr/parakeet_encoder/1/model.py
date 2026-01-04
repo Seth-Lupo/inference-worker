@@ -46,20 +46,21 @@ class TritonPythonModel:
             raise FileNotFoundError(f"ONNX model not found: {onnx_path}")
 
         # Create ONNX Runtime session with CUDA EP
-        # Use default arena settings - the restricted settings were causing allocation failures
-        # even with plenty of GPU memory available
+        # Disable cuDNN features to avoid workspace allocation issues
         providers = [
             ('CUDAExecutionProvider', {
                 'device_id': 0,
-                'arena_extend_strategy': 'kNextPowerOfTwo',  # Default, handles fragmentation better
-                'cudnn_conv_algo_search': 'DEFAULT',
+                'cudnn_conv_algo_search': 'HEURISTIC',  # Don't search, use heuristic (less memory)
+                'cudnn_conv_use_max_workspace': False,
+                'arena_extend_strategy': 'kNextPowerOfTwo',
             }),
             'CPUExecutionProvider'
         ]
 
         sess_options = ort.SessionOptions()
-        # Disable heavy optimization to reduce initial memory allocation
         sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_BASIC
+        # Disable memory pattern optimization which pre-allocates
+        sess_options.enable_mem_pattern = False
 
         # Retry with delay to handle GPU memory contention during parallel model loading
         import time
