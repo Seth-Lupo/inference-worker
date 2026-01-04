@@ -23,14 +23,14 @@ triton_paths:
   tts: "/models/tts"
 
 # -----------------------------------------------------------------------------
-# vLLM: Qwen3-4B with INT4 AWQ Quantization
+# vLLM: Qwen3-4B with INT4 GPTQ Quantization
 # -----------------------------------------------------------------------------
 vllm:
-  # Model to serve (AWQ pre-quantized from HuggingFace)
-  model: "cpatonn/Qwen3-4B-Instruct-2507-AWQ-4bit"
+  # Model to serve (GPTQ pre-quantized from HuggingFace)
+  model: "JunHowie/Qwen3-4B-GPTQ-Int4"
 
   # Quantization method (awq, gptq, or none)
-  quantization: "awq"
+  quantization: "gptq"
 
   # Engine settings (native context: 262K, limited for memory efficiency)
   max_model_len: 8192
