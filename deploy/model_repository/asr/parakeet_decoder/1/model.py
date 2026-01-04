@@ -17,6 +17,11 @@ class TritonPythonModel:
 
     def initialize(self, args):
         """Load ONNX model with ONNX Runtime."""
+        # CRITICAL: Import torch FIRST to preload CUDA libraries
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.init()
+
         import onnxruntime as ort
 
         self.model_config = json.loads(args["model_config"])
@@ -36,15 +41,16 @@ class TritonPythonModel:
         providers = [
             ('CUDAExecutionProvider', {
                 'device_id': 0,
-                'arena_extend_strategy': 'kNextPowerOfTwo',
-                'gpu_mem_limit': 1 * 1024 * 1024 * 1024,  # 1GB
-                'cudnn_conv_algo_search': 'EXHAUSTIVE',
+                'arena_extend_strategy': 'kSameAsRequested',
+                'gpu_mem_limit': 256 * 1024 * 1024,  # 256MB - decoder is smaller
+                'cudnn_conv_use_max_workspace': False,
             }),
             'CPUExecutionProvider'
         ]
 
         sess_options = ort.SessionOptions()
-        sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_BASIC
+        sess_options.add_session_config_entry("memory.enable_memory_arena_shrinkage", "gpu:0")
 
         self.session = ort.InferenceSession(onnx_path, sess_options, providers=providers)
 

@@ -18,7 +18,19 @@ class TritonPythonModel:
 
     def initialize(self, args):
         """Load ONNX model with ONNX Runtime."""
+        # CRITICAL: Import torch FIRST to preload CUDA libraries
+        # This ensures ONNX Runtime uses the same CUDA context as PyTorch
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.init()  # Initialize CUDA context
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+
         import onnxruntime as ort
+
+        # Preload DLLs for PyTorch compatibility (ONNX Runtime 1.21+)
+        if hasattr(ort, 'preload_dlls'):
+            ort.preload_dlls()
 
         self.model_config = json.loads(args["model_config"])
         model_dir = os.path.dirname(os.path.realpath(__file__))
@@ -34,43 +46,44 @@ class TritonPythonModel:
             raise FileNotFoundError(f"ONNX model not found: {onnx_path}")
 
         # Create ONNX Runtime session with CUDA EP
-        # Minimal memory footprint to coexist with PyTorch models loading in parallel
+        # Use PyTorch's CUDA allocator for memory compatibility
         providers = [
             ('CUDAExecutionProvider', {
                 'device_id': 0,
                 'arena_extend_strategy': 'kSameAsRequested',
-                'gpu_mem_limit': 128 * 1024 * 1024,  # 128MB - minimal
+                'gpu_mem_limit': 512 * 1024 * 1024,  # 512MB
                 'cudnn_conv_use_max_workspace': False,
                 'do_copy_in_default_stream': True,
-                'enable_cuda_graph': False,
-                'tunable_op_enable': False,
             }),
             'CPUExecutionProvider'
         ]
 
         sess_options = ort.SessionOptions()
-        sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL  # No optimization to reduce memory
+        sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_BASIC
         sess_options.enable_mem_reuse = True
-        sess_options.enable_cpu_mem_arena = False
-        sess_options.enable_mem_pattern = False
+        # Enable memory arena shrinkage to release unused memory
+        sess_options.add_session_config_entry("memory.enable_memory_arena_shrinkage", "gpu:0")
 
         # Retry with delay to handle GPU memory contention during parallel model loading
         import time
-        max_retries = 8
+        import torch
+        max_retries = 10
         for attempt in range(max_retries):
             try:
-                # Try to free any stale GPU memory before each attempt
-                import torch
+                # Force PyTorch to release cached GPU memory before each attempt
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
                     torch.cuda.synchronize()
+                    # Log available memory for debugging
+                    free_mem = torch.cuda.mem_get_info()[0] / 1024**2
+                    pb_utils.Logger.log_info(f"Parakeet Encoder: GPU free memory = {free_mem:.0f}MB")
 
                 self.session = ort.InferenceSession(onnx_path, sess_options, providers=providers)
                 break
             except Exception as e:
                 if attempt < max_retries - 1 and "memory" in str(e).lower():
-                    pb_utils.Logger.log_info(f"Parakeet Encoder: GPU memory contention, retry {attempt + 1}/{max_retries}")
-                    time.sleep(4)
+                    pb_utils.Logger.log_info(f"Parakeet Encoder: Memory contention, retry {attempt + 1}/{max_retries}")
+                    time.sleep(5)  # Wait longer for other models to stabilize
                 else:
                     raise
 
