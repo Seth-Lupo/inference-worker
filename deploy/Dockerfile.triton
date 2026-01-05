@@ -23,10 +23,10 @@ ENV DIFFUSERS_NO_XFORMERS=1
 ENV VLLM_USE_V1=0
 
 # Use Flash Attention backend (flashinfer not installed)
-ARG FLASHINFER_VERSION=0.5.3
-RUN pip install flashinfer-cubin \
+RUN pip install flashinfer \
+    --extra-index-url https://flashinfer.ai/whl/cu130 \
+    && pip install flashinfer-cubin \
     && pip install flashinfer-jit-cache \
-        --extra-index-url https://flashinfer.ai/whl/cu130 \
     && flashinfer show-config
 
 # Install system dependencies
