@@ -24,8 +24,8 @@ ENV VLLM_USE_V1=0
 
 # Use Flash Attention backend (flashinfer not installed)
 ARG FLASHINFER_VERSION=0.5.3
-RUN pip install --system flashinfer-cubin==${FLASHINFER_VERSION} \
-    && pip install --system flashinfer-jit-cache==${FLASHINFER_VERSION} \
+RUN pip install --system flashinfer-cubin \
+    && pip install --system flashinfer-jit-cache \
         --extra-index-url https://flashinfer.ai/whl/cu130 \
     && flashinfer show-config
 
