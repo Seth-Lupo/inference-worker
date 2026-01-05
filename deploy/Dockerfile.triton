@@ -48,29 +48,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 #      Building from source compiles against the actual torch in container.
 # =============================================================================
 
-# Get torch version to determine matching torchvision branch
-# torch 2.9 is very new - use main branch for latest compatibility
-RUN TORCH_VERSION=$(python3 -c "import torch; v=torch.__version__.split('+')[0].split('.')[:2]; print(f'{v[0]}.{v[1]}')") && \
-    echo "Torch version: $TORCH_VERSION" && \
-    # Map torch version to torchvision version
-    case "$TORCH_VERSION" in \
-        "2.9") TV_VERSION="main" ;; \
-        "2.8") TV_VERSION="main" ;; \
-        "2.7") TV_VERSION="v0.22.0" ;; \
-        "2.6") TV_VERSION="v0.21.0" ;; \
-        "2.5") TV_VERSION="v0.20.1" ;; \
-        "2.4") TV_VERSION="v0.19.1" ;; \
-        *) TV_VERSION="main" ;; \
-    esac && \
-    echo "Installing torchvision $TV_VERSION for torch $TORCH_VERSION" && \
+# Remove any pre-installed torchvision first, then build from source
+# Use pip install instead of setup.py install for proper extension registration
+RUN pip uninstall -y torchvision 2>/dev/null || true && \
     pip install --no-cache-dir ninja && \
-    git clone --depth 1 --branch $TV_VERSION https://github.com/pytorch/vision.git /tmp/vision && \
+    TORCH_VERSION=$(python3 -c "import torch; v=torch.__version__.split('+')[0].split('.')[:2]; print(f'{v[0]}.{v[1]}')") && \
+    echo "Torch version: $TORCH_VERSION" && \
+    git clone --depth 1 https://github.com/pytorch/vision.git /tmp/vision && \
     cd /tmp/vision && \
-    TORCH_CUDA_ARCH_LIST="7.0;7.5;8.0;8.6;8.9;9.0" python3 setup.py install && \
+    TORCH_CUDA_ARCH_LIST="7.0;7.5;8.0;8.6;8.9;9.0" pip install --no-cache-dir --no-build-isolation -v . && \
     rm -rf /tmp/vision /root/.cache/pip
 
-# Verify torchvision works
-RUN python3 -c "import torchvision; from torchvision.ops import nms; print(f'torchvision {torchvision.__version__}: OK')"
+# Verify torchvision C++ ops are registered
+RUN python3 -c "import torch; print('Checking torchvision ops...'); import torchvision; print(f'torchvision {torchvision.__version__}'); from torchvision.ops import nms; print('nms: OK')"
 
 # =============================================================================
 # Python Dependencies
