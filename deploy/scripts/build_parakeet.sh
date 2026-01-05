@@ -2,16 +2,15 @@
 # =============================================================================
 # Build Parakeet TDT 0.6B V2 for Triton (ASR Model)
 #
-# Architecture:
-#   parakeet_tdt (BLS Python backend - orchestrator)
-#     ├── parakeet_encoder (Python + ONNX Runtime GPU)
-#     └── parakeet_decoder (Python + ONNX Runtime GPU)
+# Architecture (Native ONNX Backend):
+#   - parakeet_encoder: Native ONNX Runtime (audio → encoded features)
+#   - parakeet_decoder: Native ONNX Runtime (encoded → tokens)
 #
-# Downloads ONNX models from HuggingFace and copies them to the model repository.
-# ONNX Runtime handles GPU execution.
+# Downloads ONNX models from HuggingFace.
+# Models are mounted into container via docker-compose.
 #
 # Usage:
-#   ./build_parakeet.sh              # Download and setup ONNX models
+#   ./build_parakeet.sh              # Download ONNX models
 #   ./build_parakeet.sh cleanup      # Clean up downloaded files
 #
 # Source: https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx
@@ -26,15 +25,14 @@ source "${SCRIPT_DIR}/common.sh"
 # =============================================================================
 HF_REPO="${HF_REPO:-$(cfg_get 'parakeet.hf_repo' 'istupakov/parakeet-tdt-0.6b-v2-onnx')}"
 
-# Paths
+# Paths - ONNX files go to models/ directory (mounted by docker-compose)
 readonly DEPLOY_DIR="$(get_deploy_dir)"
 readonly WORK_DIR="${DEPLOY_DIR}/parakeet_build"
-readonly ONNX_DIR="${DEPLOY_DIR}/model_repository/asr/parakeet_onnx"
+readonly ONNX_DIR="${DEPLOY_DIR}/models/parakeet_onnx"
 
-# Model directories
-readonly ENCODER_DIR="${DEPLOY_DIR}/model_repository/asr/parakeet_encoder"
-readonly DECODER_DIR="${DEPLOY_DIR}/model_repository/asr/parakeet_decoder"
-readonly BLS_DIR="${DEPLOY_DIR}/model_repository/asr/parakeet_tdt"
+# Config directories (for reference)
+readonly ENCODER_CONFIG="${DEPLOY_DIR}/model_repository/asr/parakeet_encoder"
+readonly DECODER_CONFIG="${DEPLOY_DIR}/model_repository/asr/parakeet_decoder"
 
 # =============================================================================
 # Cleanup Handler
@@ -49,7 +47,6 @@ if [[ "${1:-}" == "cleanup" || "${1:-}" == "clean" ]]; then
             log_warn "Removing all Parakeet files..."
             rm -rf "$WORK_DIR"
             rm -rf "$ONNX_DIR"
-            rm -f "${BLS_DIR}/1/vocab.txt"
             log_info "Cleanup complete"
             ;;
         *)
@@ -63,9 +60,9 @@ if [[ "${1:-}" == "cleanup" || "${1:-}" == "clean" ]]; then
 fi
 
 echo "=============================================="
-echo "Building Parakeet TDT 0.6B V2 (ONNX Runtime)"
+echo "Building Parakeet TDT 0.6B V2 (Native ONNX)"
 echo "=============================================="
-echo "Architecture: BLS + ONNX Runtime GPU Backends"
+echo "Architecture: Native ONNX Runtime Backend"
 echo "Source: ${HF_REPO}"
 echo ""
 
@@ -113,80 +110,55 @@ download_onnx_models() {
 }
 
 # =============================================================================
-# Stage 2: Setup Model Repository
+# Stage 2: Verify Downloads
 # =============================================================================
-setup_model_repo() {
-    log_step "Setting up Triton model repository..."
-
-    # Ensure directories exist
-    mkdir -p "${ENCODER_DIR}/1"
-    mkdir -p "${DECODER_DIR}/1"
-    mkdir -p "${BLS_DIR}/1"
-
-    # Copy vocab to BLS model directory
-    if [[ -f "${ONNX_DIR}/vocab.txt" ]]; then
-        cp "${ONNX_DIR}/vocab.txt" "${BLS_DIR}/1/"
-        log_info "Copied vocab.txt to BLS model"
-    else
-        log_error "vocab.txt not found in ${ONNX_DIR}"
-        return 1
-    fi
-
-    # Verify all components
-    log_info "Verifying model repository..."
+verify_downloads() {
+    log_step "Verifying ONNX model files..."
 
     local errors=0
 
-    # Check ONNX models
-    if [[ -f "${ONNX_DIR}/encoder-model.onnx" ]]; then
-        log_info "  ✓ parakeet_onnx/encoder-model.onnx"
+    # Check ONNX models exist and have reasonable sizes
+    if is_real_file "${ONNX_DIR}/encoder-model.onnx" 1000000; then
+        local size
+        size=$(get_file_size "${ONNX_DIR}/encoder-model.onnx" 2>/dev/null || echo "?")
+        log_info "  ✓ encoder-model.onnx ($(numfmt --to=iec "$size" 2>/dev/null || echo "${size}B"))"
     else
-        log_error "  ✗ parakeet_onnx/encoder-model.onnx MISSING"
+        log_error "  ✗ encoder-model.onnx MISSING or too small"
         ((errors++))
     fi
 
-    if [[ -f "${ONNX_DIR}/decoder_joint-model.onnx" ]]; then
-        log_info "  ✓ parakeet_onnx/decoder_joint-model.onnx"
+    # External data file for encoder (large weights)
+    if is_real_file "${ONNX_DIR}/encoder-model.onnx.data" 100000000; then
+        local size
+        size=$(get_file_size "${ONNX_DIR}/encoder-model.onnx.data" 2>/dev/null || echo "?")
+        log_info "  ✓ encoder-model.onnx.data ($(numfmt --to=iec "$size" 2>/dev/null || echo "${size}B"))"
     else
-        log_error "  ✗ parakeet_onnx/decoder_joint-model.onnx MISSING"
+        log_error "  ✗ encoder-model.onnx.data MISSING or too small (should be ~600MB)"
         ((errors++))
     fi
 
-    # Check Python backends
-    if [[ -f "${ENCODER_DIR}/1/model.py" ]]; then
-        log_info "  ✓ parakeet_encoder/1/model.py (ONNX Runtime)"
+    if is_real_file "${ONNX_DIR}/decoder_joint-model.onnx" 1000000; then
+        local size
+        size=$(get_file_size "${ONNX_DIR}/decoder_joint-model.onnx" 2>/dev/null || echo "?")
+        log_info "  ✓ decoder_joint-model.onnx ($(numfmt --to=iec "$size" 2>/dev/null || echo "${size}B"))"
     else
-        log_error "  ✗ parakeet_encoder/1/model.py MISSING"
+        log_error "  ✗ decoder_joint-model.onnx MISSING or too small"
         ((errors++))
     fi
 
-    if [[ -f "${DECODER_DIR}/1/model.py" ]]; then
-        log_info "  ✓ parakeet_decoder/1/model.py (ONNX Runtime)"
+    # Vocab is optional (used by worker for decoding, not Triton)
+    if [[ -f "${ONNX_DIR}/vocab.txt" ]]; then
+        log_info "  ✓ vocab.txt"
     else
-        log_error "  ✗ parakeet_decoder/1/model.py MISSING"
-        ((errors++))
-    fi
-
-    if [[ -f "${BLS_DIR}/1/model.py" ]]; then
-        log_info "  ✓ parakeet_tdt/1/model.py (BLS)"
-    else
-        log_error "  ✗ parakeet_tdt/1/model.py MISSING"
-        ((errors++))
-    fi
-
-    if [[ -f "${BLS_DIR}/1/vocab.txt" ]]; then
-        log_info "  ✓ parakeet_tdt/1/vocab.txt"
-    else
-        log_error "  ✗ parakeet_tdt/1/vocab.txt MISSING"
-        ((errors++))
+        log_warn "  ⚠ vocab.txt not found (optional, used by worker)"
     fi
 
     if [[ $errors -gt 0 ]]; then
-        log_error "Model repository incomplete!"
+        log_error "Missing ${errors} required ONNX files"
         return 1
     fi
 
-    log_info "Model repository ready"
+    log_info "All ONNX files ready"
 }
 
 # =============================================================================
@@ -198,18 +170,17 @@ show_summary() {
     echo -e "${GREEN}Parakeet TDT Build Complete${NC}"
     echo "=============================================="
     echo ""
-    echo "Architecture: BLS + ONNX Runtime GPU Backends"
+    echo "Architecture: Native ONNX Runtime Backend"
     echo ""
-    echo "ONNX Models:"
+    echo "ONNX Models (${ONNX_DIR}):"
     ls -lh "${ONNX_DIR}"/*.onnx 2>/dev/null || echo "  (not found)"
     echo ""
     echo "External Weights:"
     ls -lh "${ONNX_DIR}"/*.data 2>/dev/null || echo "  (none)"
     echo ""
-    echo "Python Backends:"
-    echo "  parakeet_encoder: ${ENCODER_DIR}/1/model.py"
-    echo "  parakeet_decoder: ${DECODER_DIR}/1/model.py"
-    echo "  parakeet_tdt:     ${BLS_DIR}/1/model.py"
+    echo "Triton Models (via docker-compose volume mounts):"
+    echo "  parakeet_encoder: encoder-model.onnx → /models/asr/parakeet_encoder/1/model.onnx"
+    echo "  parakeet_decoder: decoder_joint-model.onnx → /models/asr/parakeet_decoder/1/model.onnx"
     echo ""
     echo "To start Triton:"
     echo "  docker compose up -d triton"
@@ -224,7 +195,7 @@ show_summary() {
 # =============================================================================
 main() {
     download_onnx_models
-    setup_model_repo
+    verify_downloads
     show_summary
 }
 

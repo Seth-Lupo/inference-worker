@@ -9,6 +9,9 @@ name: "speech_encoder"
 platform: "onnxruntime_onnx"
 max_batch_size: 1
 
+# Use original filename (has external data file reference)
+default_model_filename: "speech_encoder_fp16.onnx"
+
 input [
   {
     name: "audio_values"

@@ -9,6 +9,9 @@ name: "conditional_decoder"
 platform: "onnxruntime_onnx"
 max_batch_size: 1
 
+# Use original filename (has external data file reference)
+default_model_filename: "conditional_decoder_fp16.onnx"
+
 input [
   {
     name: "speech_tokens"
