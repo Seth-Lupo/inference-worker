@@ -47,8 +47,9 @@ RUN pip install --no-cache-dir tritonclient[grpc]
 # (s3tokenizer registers model_type="aimv2", conflicts with transformers 4.48+)
 RUN pip install --no-cache-dir -c /tmp/frozen.txt "transformers>=4.45.0,<4.48.0"
 
-# Audio processing
+# Audio processing (pin numba>=0.63 to prevent downgrade)
 RUN pip install --no-cache-dir -c /tmp/frozen.txt \
+        "numba>=0.63.0" \
         librosa \
         soundfile \
         scipy
