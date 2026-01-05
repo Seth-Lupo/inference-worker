@@ -1,6 +1,5 @@
 {
-    "model": "/models/t3_weights",
-    "trust_remote_code": true,
+    "model": "ResembleAI/chatterbox",
     "dtype": "float16",
     "tensor_parallel_size": 1,
     "gpu_memory_utilization": 0.25,
