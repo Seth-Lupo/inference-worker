@@ -42,6 +42,9 @@ RUN pip freeze | grep -E "^(torch|nvidia)" > /tmp/frozen.txt && \
 # Triton client for BLS (Python backend calling other Triton models)
 RUN pip install --no-cache-dir tritonclient[grpc]
 
+# Install torchvision (required by transformers CLIP)
+RUN pip install --no-cache-dir --upgrade-strategy only-if-needed torchvision
+
 # Pin transformers <4.48 to avoid aimv2 conflict with s3tokenizer
 # (s3tokenizer registers model_type="aimv2", conflicts with transformers 4.48+)
 RUN pip install --no-cache-dir -c /tmp/frozen.txt "transformers>=4.45.0,<4.48.0"
