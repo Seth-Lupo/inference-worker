@@ -22,6 +22,9 @@ ENV DIFFUSERS_NO_XFORMERS=1
 # Force vLLM V0 engine - V1 cannot run in Triton's background threads
 ENV VLLM_USE_V1=0
 
+# Use Flash Attention backend (flashinfer not installed)
+ENV VLLM_ATTENTION_BACKEND=FLASH_ATTN
+
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
         espeak-ng \
