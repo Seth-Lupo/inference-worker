@@ -6,7 +6,5 @@
     "gpu_memory_utilization": 0.25,
     "max_model_len": 2048,
     "enforce_eager": true,
-    "disable_log_stats": false,
-    "disable_log_requests": true,
     "skip_tokenizer_init": true
 }
