@@ -1,70 +1,90 @@
 # Triton Inference Server with vLLM + Python backends
-# For serving:
+#
+# Models served:
 #   - Qwen3 LLM (vLLM backend)
 #   - T3 speech token generator (vLLM backend)
-#   - Chatterbox TTS (Python backend with torch.compile)
-#   - Parakeet ASR (Python backend with ONNX Runtime GPU)
+#   - Chatterbox TTS (Python backend)
+#   - Parakeet ASR (Python backend + ONNX Runtime GPU)
 #
-# Base image already includes: torch, transformers, huggingface_hub, tokenizers,
-# safetensors, numpy (via vLLM). We only add what's missing.
-#
-# Note: torchaudio removed - replaced with pure torch/librosa implementations
-# to avoid ABI compatibility issues with base image torch.
-#
-# Use base Triton Python container - install vLLM ourselves for ABI compatibility
-# All packages from pip will have matching ABIs
+# Base image includes: vLLM, torch, transformers, numpy, numba, etc.
+
 FROM nvcr.io/nvidia/tritonserver:25.12-vllm-python-py3
 
-# Disable xformers to avoid triton kernel compatibility issues
+# ============================================================================
+# Environment Configuration
+# ============================================================================
+
+# vLLM settings
+ENV VLLM_USE_V1=0
+
+# Disable xformers (causes triton kernel issues)
 ENV XFORMERS_DISABLE_MEMORY_EFFICIENT_ATTENTION=1
 ENV DIFFUSERS_NO_XFORMERS=1
 
-# Force vLLM V0 engine - V1 cannot run in Triton's background threads
-ENV VLLM_USE_V1=0
+# ============================================================================
+# System Dependencies
+# ============================================================================
 
-# Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
         espeak-ng \
         libsndfile1 \
         ffmpeg \
-        git \
     && rm -rf /var/lib/apt/lists/*
 
-# Fix corrupted numpy metadata in base container
-RUN pip install --no-cache-dir --force-reinstall numpy
+# ============================================================================
+# Python Dependencies
+# ============================================================================
 
-# Install Triton client for BLS (Python backend calling other Triton models)
+# Fix numpy metadata and freeze core packages to prevent version conflicts
+RUN pip install --no-cache-dir --force-reinstall numpy && \
+    pip freeze | grep -E "^(torch|nvidia|numpy|numba|llvmlite)" > /tmp/frozen.txt && \
+    cat /tmp/frozen.txt
+
+# Triton client for BLS (Python backend calling other Triton models)
 RUN pip install --no-cache-dir tritonclient[grpc]
 
-# Freeze torch and numpy to prevent later packages from changing them
-RUN pip freeze | grep -E "^(torch|nvidia|numpy)" > /tmp/frozen-packages.txt && \
-    echo "=== Frozen packages ===" && \
-    cat /tmp/frozen-packages.txt
+# Pin transformers <4.48 to avoid aimv2 conflict with s3tokenizer
+# (s3tokenizer registers model_type="aimv2", conflicts with transformers 4.48+)
+RUN pip install --no-cache-dir -c /tmp/frozen.txt "transformers>=4.45.0,<4.48.0"
 
-# Install audio processing libraries
-# --constraint ensures torch is never reinstalled
-RUN pip install --no-cache-dir --constraint /tmp/frozen-packages.txt \
+# Audio processing
+RUN pip install --no-cache-dir -c /tmp/frozen.txt \
         librosa \
         soundfile \
         scipy
 
-# Pin transformers to avoid aimv2 conflict with s3tokenizer
-# s3tokenizer registers model_type="aimv2", but transformers 4.48+ has built-in aimv2
-RUN pip install --no-cache-dir --constraint /tmp/frozen-packages.txt \
-        "transformers>=4.45.0,<4.48.0"
-
-# Install S3Gen/Chatterbox dependencies (not in base image)
-# diffusers 0.27+ avoids cached_download deprecation in new huggingface_hub
-RUN pip install --no-cache-dir --constraint /tmp/frozen-packages.txt \
+# Chatterbox/S3Gen dependencies
+RUN pip install --no-cache-dir -c /tmp/frozen.txt \
         omegaconf \
         einops \
-        "diffusers>=0.27.0,<0.30.0" \
         conformer \
+        "diffusers>=0.27.0,<0.30.0" \
         "s3tokenizer>=0.3.0"
 
-# Remove xformers if installed (causes triton kernel issues)
-RUN pip uninstall -y xformers || true
+# Parakeet ASR (ONNX Runtime GPU)
+RUN pip install --no-cache-dir -c /tmp/frozen.txt onnxruntime-gpu
 
-# Install ONNX Runtime GPU for Parakeet ASR
-# Uses CUDA EP for GPU acceleration of ONNX models
-RUN pip install --no-cache-dir --constraint /tmp/frozen-packages.txt onnxruntime-gpu
+# Quantized model support (GPTQ, AWQ)
+RUN pip install --no-cache-dir compressed-tensors
+
+# ============================================================================
+# Cleanup
+# ============================================================================
+
+RUN pip uninstall -y xformers 2>/dev/null || true && \
+    rm -rf /tmp/frozen.txt /root/.cache/pip
+
+# ============================================================================
+# Verification
+# ============================================================================
+
+RUN echo "=== Package Versions ===" && \
+    python3 -c "import torch; print(f'torch:        {torch.__version__}')" && \
+    python3 -c "import vllm; print(f'vllm:         {vllm.__version__}')" && \
+    python3 -c "import transformers; print(f'transformers: {transformers.__version__}')" && \
+    python3 -c "import numpy; print(f'numpy:        {numpy.__version__}')" && \
+    python3 -c "import librosa; print(f'librosa:      {librosa.__version__}')" && \
+    python3 -c "import onnxruntime; print(f'onnxruntime:  {onnxruntime.__version__}')" && \
+    python3 -c "import s3tokenizer; print('s3tokenizer:  OK')" && \
+    echo "=== Triton Backends ===" && \
+    ls -1 /opt/tritonserver/backends/
