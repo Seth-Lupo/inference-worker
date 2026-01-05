@@ -1,0 +1,58 @@
+# Chatterbox Speech Encoder - Native ONNX Backend
+# Encodes reference audio into speaker embeddings and conditioning
+# Source: ResembleAI/chatterbox-turbo-ONNX
+#
+# Input: Reference audio waveform (24kHz float32)
+# Output: Speaker embeddings + conditioning for T3 and decoder
+
+name: "speech_encoder"
+platform: "onnxruntime_onnx"
+max_batch_size: 1
+
+input [
+  {
+    name: "audio_values"
+    data_type: TYPE_FP32
+    dims: [ -1 ]  # Variable length audio samples
+  }
+]
+
+output [
+  {
+    name: "cond_emb"
+    data_type: TYPE_FP32
+    dims: [ -1, -1 ]  # Conditioning embeddings
+  },
+  {
+    name: "prompt_token"
+    data_type: TYPE_INT64
+    dims: [ -1 ]  # Speech tokens from reference
+  },
+  {
+    name: "speaker_embeddings"
+    data_type: TYPE_FP32
+    dims: [ -1 ]  # Speaker embedding vector
+  },
+  {
+    name: "speaker_features"
+    data_type: TYPE_FP32
+    dims: [ -1, -1 ]  # Speaker features for decoder
+  }
+]
+
+instance_group [
+  {
+    count: 1
+    kind: KIND_GPU
+    gpus: [ 0 ]
+  }
+]
+
+# ONNX Runtime GPU optimization
+optimization {
+  execution_accelerators {
+    gpu_execution_accelerator: [
+      { name: "cuda" }
+    ]
+  }
+}

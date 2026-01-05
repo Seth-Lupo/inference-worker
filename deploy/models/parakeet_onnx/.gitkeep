@@ -1,0 +1,9 @@
+# Parakeet ONNX Models
+# Place the following ONNX files here:
+#   - encoder-model.onnx
+#   - decoder_joint-model.onnx
+#
+# Export from NeMo Parakeet TDT 0.6B v2:
+#   python -m nemo.collections.asr.parts.utils.onnx_export \
+#       --model nvidia/parakeet-tdt-0.6b-v2 \
+#       --export-dir ./parakeet_onnx

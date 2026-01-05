@@ -1,22 +1,22 @@
-# Parakeet Decoder Joint - ONNX Runtime Python Backend
+# Parakeet Decoder Joint - Native ONNX Backend
 # Transducer decoder with joint network for autoregressive decoding
-#
-# Called once per frame, may emit multiple tokens per frame
+# Input: Encoder frame + previous tokens + LSTM states
+# Output: Logits + updated LSTM states
 
 name: "parakeet_decoder"
-backend: "python"
-max_batch_size: 0
+platform: "onnxruntime_onnx"
+max_batch_size: 1
 
 input [
   {
     name: "encoder_outputs"
     data_type: TYPE_FP16
-    dims: [ 1, 512, 1 ]
+    dims: [ 512, 1 ]
   },
   {
     name: "targets"
     data_type: TYPE_INT64
-    dims: [ 1, 1 ]
+    dims: [ 1 ]
   },
   {
     name: "target_length"
@@ -39,7 +39,7 @@ output [
   {
     name: "outputs"
     data_type: TYPE_FP16
-    dims: [ 1, 1, 1025 ]
+    dims: [ 1, 1025 ]
   },
   {
     name: "output_states_1"
@@ -61,9 +61,11 @@ instance_group [
   }
 ]
 
-parameters {
-  key: "ONNX_DIR"
-  value: { string_value: "/models/asr/parakeet_onnx" }
+# ONNX Runtime optimization
+optimization {
+  execution_accelerators {
+    gpu_execution_accelerator: [
+      { name: "cuda" }
+    ]
+  }
 }
-
-version_policy: { latest: { num_versions: 1 } }

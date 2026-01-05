@@ -2,16 +2,16 @@
 # =============================================================================
 # Build Chatterbox TTS for Triton Inference Server
 #
-# Architecture (Pure PyTorch with torch.compile):
+# Architecture (Native ONNX + vLLM):
 #   - T3: Triton vLLM backend (text + speaker conditioning → speech tokens)
-#   - S3Gen: PyTorch with torch.compile (speech tokens → audio)
-#   - VoiceEncoder: PyTorch (reference audio → speaker embedding)
+#   - speech_encoder: Native ONNX (reference audio → conditioning)
+#   - conditional_decoder: Native ONNX (speech tokens → audio waveform)
+#
+# ONNX models from: ResembleAI/chatterbox-turbo-ONNX
 #
 # Usage:
 #   ./build_chatterbox.sh              # Build everything
 #   ./build_chatterbox.sh cleanup      # Clean up
-#
-# Container: nvcr.io/nvidia/tritonserver:25.05-vllm-python-py3
 # =============================================================================
 
 set -euo pipefail
@@ -24,8 +24,9 @@ source "${SCRIPT_DIR}/common.sh"
 # Configuration
 # =============================================================================
 
-# HuggingFace repo (weights only)
+# HuggingFace repos
 HF_REPO_MAIN="${HF_REPO_MAIN:-ResembleAI/chatterbox}"
+HF_REPO_ONNX="${HF_REPO_ONNX:-ResembleAI/chatterbox-turbo-ONNX}"
 
 # Paths
 readonly DEPLOY_DIR="$(get_deploy_dir)"
@@ -35,9 +36,13 @@ readonly WORK_DIR="${DEPLOY_DIR}/chatterbox_build"
 readonly T3_WEIGHTS_DIR="${DEPLOY_DIR}/models/t3_weights"
 readonly T3_MODEL_DIR="${DEPLOY_DIR}/model_repository/llm/t3"
 
-# Chatterbox Python backend
-readonly CHATTERBOX_DIR="${DEPLOY_DIR}/model_repository/tts/chatterbox"
-readonly ASSETS_DIR="${DEPLOY_DIR}/model_repository/tts/chatterbox_assets"
+# ONNX models for native Triton backend
+readonly ONNX_DIR="${DEPLOY_DIR}/models/chatterbox_onnx"
+readonly SPEECH_ENCODER_DIR="${DEPLOY_DIR}/model_repository/tts/speech_encoder"
+readonly CONDITIONAL_DECODER_DIR="${DEPLOY_DIR}/model_repository/tts/conditional_decoder"
+
+# ONNX precision (fp16 recommended for GPU)
+ONNX_DTYPE="${ONNX_DTYPE:-fp16}"
 
 # =============================================================================
 # Cleanup Handler
@@ -51,13 +56,13 @@ if [[ "${1:-}" == "cleanup" || "${1:-}" == "clean" ]]; then
             log_warn "Removing ALL build artifacts..."
             rm -rf "$WORK_DIR"
             rm -rf "$T3_WEIGHTS_DIR"
-            rm -rf "$ASSETS_DIR"
+            rm -rf "$ONNX_DIR"
             log_info "Cleanup complete"
             ;;
         --weights|-w)
             log_info "Removing downloaded weights..."
             rm -rf "$T3_WEIGHTS_DIR"
-            rm -rf "$ASSETS_DIR"
+            rm -rf "$ONNX_DIR"
             log_info "Weights removed"
             ;;
         *)
@@ -74,12 +79,13 @@ if [[ "${1:-}" == "cleanup" || "${1:-}" == "clean" ]]; then
 fi
 
 echo "=============================================="
-echo "Building Chatterbox TTS (Pure PyTorch)"
+echo "Building Chatterbox TTS (Native ONNX + vLLM)"
 echo "=============================================="
 echo ""
-echo "T3 vLLM model:  ${T3_WEIGHTS_DIR}"
-echo "Assets:         ${ASSETS_DIR}"
-echo "Backend:        PyTorch + torch.compile()"
+echo "T3 vLLM model:      ${T3_WEIGHTS_DIR}"
+echo "ONNX models:        ${ONNX_DIR}"
+echo "ONNX precision:     ${ONNX_DTYPE}"
+echo "Backend:            vLLM (T3) + ONNX Runtime (encoder/decoder)"
 echo ""
 
 mkdir -p "$WORK_DIR"
@@ -180,115 +186,147 @@ EOF
 }
 
 # =============================================================================
-# Stage 2: Download S3Gen and VoiceEncoder (PyTorch)
+# Stage 2: Download ONNX Models from chatterbox-turbo-ONNX
 # =============================================================================
-download_assets() {
-    log_step "Downloading S3Gen and VoiceEncoder assets..."
+download_onnx() {
+    log_step "Downloading Chatterbox ONNX models..."
 
-    mkdir -p "$ASSETS_DIR"
+    mkdir -p "$ONNX_DIR"
 
-    # Required files with minimum size thresholds (bytes)
-    # s3gen.safetensors: ~900MB, ve.safetensors: ~8MB
-    declare -A required_files=(
-        ["s3gen.safetensors"]=100000000   # 100MB min
-        ["ve.safetensors"]=1000000        # 1MB min
-    )
-    # Optional files (nice to have but not critical)
-    local optional_files=("conds.pt")
+    # ONNX models to download (speech_encoder and conditional_decoder)
+    # fp16 is recommended for GPU, but fp32 and quantized versions available
+    local dtype_suffix=""
+    case "$ONNX_DTYPE" in
+        fp32) dtype_suffix="" ;;
+        fp16) dtype_suffix="_fp16" ;;
+        q8)   dtype_suffix="_quantized" ;;
+        q4)   dtype_suffix="_q4" ;;
+        q4f16) dtype_suffix="_q4f16" ;;
+        *) log_error "Unknown ONNX dtype: $ONNX_DTYPE"; return 1 ;;
+    esac
 
-    # Check if already downloaded
+    local models=("speech_encoder" "conditional_decoder")
     local all_exist=true
-    for file in "${!required_files[@]}"; do
-        if ! is_real_file "${ASSETS_DIR}/${file}" "${required_files[$file]}"; then
+
+    # Check if models already downloaded
+    for model in "${models[@]}"; do
+        local onnx_file="${ONNX_DIR}/${model}${dtype_suffix}.onnx"
+        if ! is_real_file "$onnx_file" 1000000; then
             all_exist=false
             break
         fi
     done
 
     if [[ "$all_exist" == "true" ]]; then
-        log_info "Assets already downloaded"
+        log_info "ONNX models already downloaded"
     else
-        # Clone repo if not already cloned by download_t3
-        if [[ ! -d "${WORK_DIR}/chatterbox/.git" ]]; then
-            log_info "Cloning ${HF_REPO_MAIN} with LFS..."
-            hf_clone "$HF_REPO_MAIN" "${WORK_DIR}/chatterbox" || {
-                log_error "Failed to clone from HuggingFace"
-                return 1
-            }
-        fi
+        # Clone the ONNX repo (shallow, then pull specific files)
+        log_info "Cloning ${HF_REPO_ONNX} (shallow)..."
+        hf_clone_shallow "$HF_REPO_ONNX" "${WORK_DIR}/chatterbox-onnx" || {
+            log_error "Failed to clone ONNX repo"
+            return 1
+        }
 
-        # Copy required files
-        for file in "${!required_files[@]}"; do
-            if [[ -f "${WORK_DIR}/chatterbox/${file}" ]]; then
-                cp "${WORK_DIR}/chatterbox/${file}" "$ASSETS_DIR/"
-                log_info "  ✓ ${file}"
+        # Pull only the ONNX files we need
+        local lfs_patterns=()
+        for model in "${models[@]}"; do
+            lfs_patterns+=("onnx/${model}${dtype_suffix}.onnx")
+            lfs_patterns+=("onnx/${model}${dtype_suffix}.onnx_data")
+        done
+
+        log_info "Pulling ONNX files: ${lfs_patterns[*]}"
+        (
+            cd "${WORK_DIR}/chatterbox-onnx"
+            for pattern in "${lfs_patterns[@]}"; do
+                git lfs pull --include "$pattern" 2>/dev/null || true
+            done
+        )
+
+        # Copy ONNX files to output directory
+        for model in "${models[@]}"; do
+            local src="${WORK_DIR}/chatterbox-onnx/onnx/${model}${dtype_suffix}.onnx"
+            local src_data="${WORK_DIR}/chatterbox-onnx/onnx/${model}${dtype_suffix}.onnx_data"
+            local dst="${ONNX_DIR}/${model}${dtype_suffix}.onnx"
+            local dst_data="${ONNX_DIR}/${model}${dtype_suffix}.onnx_data"
+
+            if [[ -f "$src" ]]; then
+                cp "$src" "$dst"
+                log_info "  ✓ ${model}${dtype_suffix}.onnx"
             else
-                log_warn "  ✗ ${file} not found in repo"
+                log_warn "  ✗ ${model}${dtype_suffix}.onnx not found"
             fi
-        done
 
-        # Copy optional files
-        for file in "${optional_files[@]}"; do
-            if [[ -f "${WORK_DIR}/chatterbox/${file}" ]]; then
-                cp "${WORK_DIR}/chatterbox/${file}" "$ASSETS_DIR/"
-                log_info "  ✓ ${file} (optional)"
+            # Copy external data file if exists
+            if [[ -f "$src_data" ]]; then
+                cp "$src_data" "$dst_data"
+                log_info "  ✓ ${model}${dtype_suffix}.onnx_data"
             fi
         done
     fi
 
-    # Copy tokenizer to assets (Python backend needs it too)
-    if [[ -f "${T3_WEIGHTS_DIR}/tokenizer.json" ]] && [[ ! -f "${ASSETS_DIR}/tokenizer.json" ]]; then
-        cp "${T3_WEIGHTS_DIR}/tokenizer.json" "${ASSETS_DIR}/"
-        log_info "Copied tokenizer.json to assets"
-    fi
-
-    # Verify required files
+    # Verify downloaded files
+    log_info "Verifying ONNX models..."
     local missing=0
-    for file in "${!required_files[@]}"; do
-        if is_real_file "${ASSETS_DIR}/${file}" "${required_files[$file]}"; then
-            log_info "  ✓ ${file}"
+    for model in "${models[@]}"; do
+        local onnx_file="${ONNX_DIR}/${model}${dtype_suffix}.onnx"
+        if is_real_file "$onnx_file" 1000000; then
+            local size
+            size=$(get_file_size "$onnx_file")
+            log_info "  ✓ ${model}${dtype_suffix}.onnx ($(numfmt --to=iec "$size" 2>/dev/null || echo "${size}B"))"
         else
-            log_warn "  ✗ ${file} MISSING or too small"
+            log_warn "  ✗ ${model}${dtype_suffix}.onnx MISSING or too small"
             ((missing++))
         fi
     done
 
-    # Check optional files (just info, not failure)
-    for file in "${optional_files[@]}"; do
-        if [[ -f "${ASSETS_DIR}/${file}" ]]; then
-            log_info "  ✓ ${file} (optional)"
-        else
-            log_info "  - ${file} not present (optional)"
-        fi
-    done
-
     if [[ $missing -gt 0 ]]; then
-        log_error "Missing ${missing} required asset files"
+        log_error "Missing ${missing} ONNX model files"
         return 1
     fi
 
-    log_info "Assets ready at: ${ASSETS_DIR}"
+    # Create symlinks to model.onnx in Triton model directories
+    log_info "Creating Triton model symlinks..."
+
+    mkdir -p "${SPEECH_ENCODER_DIR}/1"
+    mkdir -p "${CONDITIONAL_DECODER_DIR}/1"
+
+    # Symlink for speech_encoder
+    local se_src="${ONNX_DIR}/speech_encoder${dtype_suffix}.onnx"
+    local se_dst="${SPEECH_ENCODER_DIR}/1/model.onnx"
+    if [[ -f "$se_src" ]]; then
+        ln -sf "$se_src" "$se_dst"
+        log_info "  ✓ speech_encoder/1/model.onnx -> ${se_src}"
+    fi
+    # Also link external data if exists
+    if [[ -f "${se_src}_data" ]]; then
+        ln -sf "${se_src}_data" "${SPEECH_ENCODER_DIR}/1/model.onnx_data"
+    fi
+
+    # Symlink for conditional_decoder
+    local cd_src="${ONNX_DIR}/conditional_decoder${dtype_suffix}.onnx"
+    local cd_dst="${CONDITIONAL_DECODER_DIR}/1/model.onnx"
+    if [[ -f "$cd_src" ]]; then
+        ln -sf "$cd_src" "$cd_dst"
+        log_info "  ✓ conditional_decoder/1/model.onnx -> ${cd_src}"
+    fi
+    # Also link external data if exists
+    if [[ -f "${cd_src}_data" ]]; then
+        ln -sf "${cd_src}_data" "${CONDITIONAL_DECODER_DIR}/1/model.onnx_data"
+    fi
+
+    log_info "ONNX models ready at: ${ONNX_DIR}"
 }
 
 # =============================================================================
-# Stage 3: Compile Voice Conditioning
+# Stage 3: Voice Conditioning (Optional - for pre-computed voices)
 # =============================================================================
 compile_voices() {
-    log_step "Compiling voice conditioning..."
+    log_step "Checking voice conditioning..."
 
     local voices_dir="${DEPLOY_DIR}/voices"
     local output_dir="${T3_WEIGHTS_DIR}/voices"
 
     mkdir -p "$output_dir"
-
-    # Check required assets
-    if [[ ! -f "${ASSETS_DIR}/ve.safetensors" ]]; then
-        log_warn "VoiceEncoder not found - skipping voice compilation"
-        return 0
-    fi
-
-    # Use python3.12
-    local python_cmd="python3.12"
 
     # Check for voice files
     local has_voices=false
@@ -301,29 +339,16 @@ compile_voices() {
         done
     fi
 
-    # Build command
-    local cmd_args=(
-        "${SCRIPT_DIR}/create_conditioning.py"
-        --assets-dir "${ASSETS_DIR}"
-        --output-dir "${output_dir}"
-    )
-
     if [[ "$has_voices" == "true" ]]; then
         local count
         count=$(find "$voices_dir" -maxdepth 1 -type f \( -name "*.wav" -o -name "*.mp3" -o -name "*.flac" \) | wc -l | tr -d ' ')
         log_info "Found ${count} voice file(s) in ${voices_dir}"
-        cmd_args+=(--voices-dir "${voices_dir}")
+        log_info "Voice conditioning will be computed at runtime via speech_encoder ONNX model"
     else
-        log_info "No custom voices - using default only"
+        log_info "No custom voices - will use reference audio at runtime"
     fi
 
-    # Run compilation
-    if $python_cmd "${cmd_args[@]}" 2>/dev/null; then
-        log_info "Voice conditioning compiled"
-        [[ -f "${output_dir}/voices.json" ]] && cat "${output_dir}/voices.json"
-    else
-        log_warn "Voice compilation failed - T3 may need runtime conditioning"
-    fi
+    log_info "Note: Voice conditioning is now done via Triton speech_encoder model"
 }
 
 # =============================================================================
@@ -373,82 +398,18 @@ EOF
     log_info "Created: ${T3_MODEL_DIR}/config.pbtxt"
 
     # -------------------------------------------------------------------------
-    # Chatterbox Python backend config (if not exists)
+    # Verify ONNX model configs exist
     # -------------------------------------------------------------------------
-    if [[ ! -f "${CHATTERBOX_DIR}/config.pbtxt" ]]; then
-        mkdir -p "${CHATTERBOX_DIR}/1"
-
-        cat > "${CHATTERBOX_DIR}/config.pbtxt" << 'EOF'
-# Chatterbox TTS Python Backend
-# Calls T3 via gRPC for token generation, runs S3Gen locally for audio synthesis
-name: "chatterbox"
-backend: "python"
-max_batch_size: 1
-
-input [
-  {
-    name: "text"
-    data_type: TYPE_STRING
-    dims: [ 1 ]
-  },
-  {
-    name: "speaker_id"
-    data_type: TYPE_STRING
-    dims: [ 1 ]
-    optional: true
-  },
-  {
-    name: "reference_audio"
-    data_type: TYPE_FP32
-    dims: [ -1 ]
-    optional: true
-  }
-]
-
-output [
-  {
-    name: "audio"
-    data_type: TYPE_FP32
-    dims: [ -1 ]
-  },
-  {
-    name: "sample_rate"
-    data_type: TYPE_INT32
-    dims: [ 1 ]
-  }
-]
-
-instance_group [
-  {
-    count: 1
-    kind: KIND_GPU
-    gpus: [ 0 ]
-  }
-]
-
-# Enable streaming for progressive audio output
-model_transaction_policy {
-  decoupled: true
-}
-
-parameters {
-  key: "ASSETS_DIR"
-  value: { string_value: "/models/tts/chatterbox_assets" }
-}
-
-parameters {
-  key: "T3_MODEL_NAME"
-  value: { string_value: "t3" }
-}
-
-parameters {
-  key: "TRITON_GRPC_URL"
-  value: { string_value: "localhost:8001" }
-}
-EOF
-        log_info "Created: ${CHATTERBOX_DIR}/config.pbtxt"
+    if [[ -f "${SPEECH_ENCODER_DIR}/config.pbtxt" ]]; then
+        log_info "speech_encoder config.pbtxt exists"
     else
-        log_info "Chatterbox config.pbtxt already exists"
+        log_warn "speech_encoder config.pbtxt missing - create it manually"
+    fi
+
+    if [[ -f "${CONDITIONAL_DECODER_DIR}/config.pbtxt" ]]; then
+        log_info "conditional_decoder config.pbtxt exists"
+    else
+        log_warn "conditional_decoder config.pbtxt missing - create it manually"
     fi
 }
 
@@ -466,22 +427,19 @@ show_summary() {
     echo "  Triton:   ${T3_MODEL_DIR}"
     ls -lh "${T3_WEIGHTS_DIR}"/*.safetensors 2>/dev/null | head -3
     echo ""
-    echo "S3Gen/VE Assets:"
-    echo "  Location: ${ASSETS_DIR}"
-    ls -lh "${ASSETS_DIR}"/*.safetensors 2>/dev/null | head -3
+    echo "ONNX Models (${ONNX_DTYPE}):"
+    echo "  Location: ${ONNX_DIR}"
+    ls -lh "${ONNX_DIR}"/*.onnx 2>/dev/null | head -5
     echo ""
-    echo "Backend: PyTorch + torch.compile()"
-    echo ""
-    echo "Voices:"
-    if [[ -f "${T3_WEIGHTS_DIR}/voices/voices.json" ]]; then
-        cat "${T3_WEIGHTS_DIR}/voices/voices.json"
-    else
-        echo "  (none compiled)"
-    fi
+    echo "Triton Models:"
+    echo "  - t3 (vLLM): Speech token generation"
+    echo "  - speech_encoder (ONNX): Reference audio → conditioning"
+    echo "  - conditional_decoder (ONNX): Speech tokens → audio"
     echo ""
     echo "Next steps:"
-    echo "  1. Start Triton: docker compose up -d triton"
-    echo "  2. Start worker: docker compose up -d worker"
+    echo "  1. Build Docker: docker compose build triton"
+    echo "  2. Start Triton: docker compose up -d triton"
+    echo "  3. Start worker: docker compose up -d worker"
     echo ""
 }
 
@@ -490,7 +448,7 @@ show_summary() {
 # =============================================================================
 main() {
     download_t3
-    download_assets
+    download_onnx
     compile_voices
     create_triton_configs
     show_summary

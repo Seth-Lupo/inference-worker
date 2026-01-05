@@ -1,100 +1,35 @@
 # =============================================================================
-# Triton Inference Server - Voice Agent Stack
+# Triton Inference Server - Pure Native Backends
 # =============================================================================
 #
 # Models:
-#   - Qwen3 LLM (vLLM backend)
-#   - T3 speech tokens (vLLM backend)
-#   - Chatterbox TTS (Python backend)
-#   - Parakeet ASR (Python backend + ONNX Runtime)
+#   - qwen3: vLLM backend (LLM for chat/reasoning)
+#   - t3: vLLM backend (TTS speech token generation)
+#   - speech_encoder: ONNX backend (TTS reference audio → conditioning)
+#   - conditional_decoder: ONNX backend (TTS speech tokens → audio)
+#   - parakeet_encoder: ONNX backend (ASR encoder)
+#   - parakeet_decoder: ONNX backend (ASR decoder)
 #
-# Dependency Strategy:
-#   1. Use NVIDIA's pre-built vLLM + torch (GPU optimized)
-#   2. Avoid diffusers (imports torchvision which has ABI issues with NVIDIA torch)
-#   3. Pin transformers < 4.48 (s3tokenizer aimv2 conflict)
-#   4. Use --upgrade-strategy only-if-needed (preserve base packages)
+# ONNX models from: ResembleAI/chatterbox-turbo-ONNX
+# All orchestration done in Worker via gRPC.
 #
 # =============================================================================
 
 FROM nvcr.io/nvidia/tritonserver:25.12-vllm-python-py3
 
-# =============================================================================
-# Environment Configuration
-# =============================================================================
+# Add ONNX Runtime backend for TTS and ASR models
+COPY --from=nvcr.io/nvidia/tritonserver:25.12-onnxruntime-python-py3 \
+    /opt/tritonserver/backends/onnxruntime \
+    /opt/tritonserver/backends/onnxruntime
 
-# vLLM: Use V0 engine (V1 incompatible with Triton's threading model)
+# Environment
 ENV VLLM_USE_V1=0
 
-# Disable xformers (causes triton kernel compatibility issues)
-ENV XFORMERS_DISABLE_MEMORY_EFFICIENT_ATTENTION=1
-
-# =============================================================================
-# System Dependencies
-# =============================================================================
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        espeak-ng \
-        libsndfile1 \
-        ffmpeg \
-    && rm -rf /var/lib/apt/lists/*
-
-# =============================================================================
-# Python Dependencies
-# =============================================================================
-
-# Triton client for BLS (Python backend calling other Triton models)
-RUN pip install --no-cache-dir tritonclient[grpc]
-
-# Pin transformers to avoid aimv2 conflict with s3tokenizer
-# (s3tokenizer registers model_type="aimv2", conflicts with transformers 4.48+)
+# Minimal dependencies for vLLM custom models (T3)
 RUN pip install --no-cache-dir --upgrade-strategy only-if-needed \
-        "transformers>=4.45.0,<4.48.0"
+        "transformers>=4.45.0,<4.48.0" \
+        "s3tokenizer>=0.3.0" && \
+    rm -rf /root/.cache/pip
 
-# Audio processing
-RUN pip install --no-cache-dir --upgrade-strategy only-if-needed \
-        librosa \
-        soundfile \
-        scipy
-
-# Chatterbox TTS / S3Gen dependencies
-# Note: diffusers removed - using local diffusers_compat.py to avoid torchvision ABI issues
-RUN pip install --no-cache-dir --upgrade-strategy only-if-needed \
-        omegaconf \
-        einops \
-        conformer \
-        "s3tokenizer>=0.3.0"
-
-# Parakeet ASR (ONNX Runtime with CUDA)
-RUN pip install --no-cache-dir --upgrade-strategy only-if-needed \
-        onnxruntime-gpu
-
-# Quantized model support (GPTQ, AWQ)
-RUN pip install --no-cache-dir --upgrade-strategy only-if-needed \
-        compressed-tensors
-
-# =============================================================================
-# Cleanup
-# =============================================================================
-
-RUN pip uninstall -y xformers 2>/dev/null || true && \
-    rm -rf /root/.cache/pip /tmp/*
-
-# =============================================================================
-# Verification
-# =============================================================================
-
-RUN echo "============================================" && \
-    echo "Package Versions:" && \
-    echo "============================================" && \
-    python3 -c "import torch; print(f'  torch:        {torch.__version__}')" && \
-    python3 -c "import vllm; print(f'  vllm:         {vllm.__version__}')" && \
-    python3 -c "import transformers; print(f'  transformers: {transformers.__version__}')" && \
-    python3 -c "import numpy; print(f'  numpy:        {numpy.__version__}')" && \
-    python3 -c "import librosa; print(f'  librosa:      {librosa.__version__}')" && \
-    python3 -c "import onnxruntime; print(f'  onnxruntime:  {onnxruntime.__version__}')" && \
-    python3 -c "import s3tokenizer; print('  s3tokenizer:  OK')" && \
-    python3 -c "import conformer; print('  conformer:    OK')" && \
-    echo "============================================" && \
-    echo "Triton Backends:" && \
-    echo "============================================" && \
-    ls -1 /opt/tritonserver/backends/ | sed 's/^/  /'
+# Verify backends
+RUN echo "Backends:" && ls -1 /opt/tritonserver/backends/

@@ -1,0 +1,53 @@
+# Chatterbox Conditional Decoder - Native ONNX Backend
+# Converts speech tokens to audio waveform (vocoder)
+# Source: ResembleAI/chatterbox-turbo-ONNX
+#
+# Input: Speech tokens + speaker conditioning
+# Output: Audio waveform at 24kHz
+
+name: "conditional_decoder"
+platform: "onnxruntime_onnx"
+max_batch_size: 1
+
+input [
+  {
+    name: "speech_tokens"
+    data_type: TYPE_INT64
+    dims: [ -1 ]  # Variable length speech token sequence
+  },
+  {
+    name: "speaker_embeddings"
+    data_type: TYPE_FP32
+    dims: [ -1 ]  # Speaker embedding from speech_encoder
+  },
+  {
+    name: "speaker_features"
+    data_type: TYPE_FP32
+    dims: [ -1, -1 ]  # Speaker features from speech_encoder
+  }
+]
+
+output [
+  {
+    name: "wav"
+    data_type: TYPE_FP32
+    dims: [ -1 ]  # Audio waveform at 24kHz
+  }
+]
+
+instance_group [
+  {
+    count: 1
+    kind: KIND_GPU
+    gpus: [ 0 ]
+  }
+]
+
+# ONNX Runtime GPU optimization
+optimization {
+  execution_accelerators {
+    gpu_execution_accelerator: [
+      { name: "cuda" }
+    ]
+  }
+}
