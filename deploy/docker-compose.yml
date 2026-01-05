@@ -25,12 +25,12 @@ services:
   # vLLM for T3/Qwen3, ONNX Runtime for ASR and TTS encoder/decoder
   # =============================================================================
   triton:
-    image: nvcr.io/nvidia/tritonserver:25.12-py3
-    container_name: voice-agent-triton
-    restart: unless-stopped
     build:
       context: ..
       dockerfile: deploy/Dockerfile.triton
+    image: voice-agent-triton:latest
+    container_name: voice-agent-triton
+    restart: unless-stopped
 
     deploy:
       resources:
@@ -55,8 +55,12 @@ services:
       - ./model_repository/llm:/models/llm
       - ./model_repository/tts:/models/tts
       - ./model_repository/asr:/models/asr
-      # Chatterbox TTS ONNX models (speech_encoder + conditional_decoder)
-      - ./models/chatterbox_onnx:/models/chatterbox_onnx:ro
+      # Chatterbox TTS ONNX models (direct mounts to Triton model version dirs)
+      # Note: fp16 versions, external data files optional (only mount if they exist)
+      - ./models/chatterbox_onnx/speech_encoder_fp16.onnx:/models/tts/speech_encoder/1/model.onnx:ro
+      - ./models/chatterbox_onnx/speech_encoder_fp16.onnx_data:/models/tts/speech_encoder/1/model.onnx_data:ro
+      - ./models/chatterbox_onnx/conditional_decoder_fp16.onnx:/models/tts/conditional_decoder/1/model.onnx:ro
+      - ./models/chatterbox_onnx/conditional_decoder_fp16.onnx_data:/models/tts/conditional_decoder/1/model.onnx_data:ro
       # Parakeet ASR ONNX models
       - ./models/parakeet_onnx/encoder-model.onnx:/models/asr/parakeet_encoder/1/model.onnx:ro
       - ./models/parakeet_onnx/decoder_joint-model.onnx:/models/asr/parakeet_decoder/1/model.onnx:ro

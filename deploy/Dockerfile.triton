@@ -15,41 +15,34 @@
 #
 # =============================================================================
 
-FROM nvcr.io/nvidia/tritonserver:25.12-vllm-python-py3
+# Start with full py3 image (has ONNX Runtime + other backends)
+FROM nvcr.io/nvidia/tritonserver:25.12-py3
+
+# Copy vLLM backend from vLLM-specific image
+COPY --from=nvcr.io/nvidia/tritonserver:25.12-vllm-python-py3 \
+    /opt/tritonserver/backends/vllm \
+    /opt/tritonserver/backends/vllm
 
 # Environment
 ENV VLLM_USE_V1=0
 
-# Build ONNX Runtime backend from source
-# Based on: https://github.com/triton-inference-server/onnxruntime_backend
-ARG ONNXRUNTIME_VERSION=1.21.0
-ARG TRITON_CONTAINER_VERSION=25.12
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        cmake \
-        rapidjson-dev \
-    && rm -rf /var/lib/apt/lists/*
-
-# Clone and build ONNX Runtime backend
-RUN git clone --depth 1 --branch r${TRITON_CONTAINER_VERSION} \
-        https://github.com/triton-inference-server/onnxruntime_backend.git \
-        /tmp/onnxruntime_backend && \
-    mkdir -p /tmp/onnxruntime_backend/build && \
-    cd /tmp/onnxruntime_backend/build && \
-    cmake -DCMAKE_INSTALL_PREFIX:PATH=/opt/tritonserver \
-          -DTRITON_BUILD_ONNXRUNTIME_VERSION=${ONNXRUNTIME_VERSION} \
-          -DTRITON_BUILD_CONTAINER_VERSION=${TRITON_CONTAINER_VERSION} \
-          -DTRITON_ENABLE_GPU=ON \
-          -DTRITON_ENABLE_ONNXRUNTIME_TENSORRT=OFF \
-          .. && \
-    make -j$(nproc) install && \
-    rm -rf /tmp/onnxruntime_backend
-
-# Minimal dependencies for vLLM custom models (T3)
+# Install vLLM and dependencies (same as vllm image)
 RUN pip install --no-cache-dir --upgrade-strategy only-if-needed \
+        vllm \
         "transformers>=4.45.0,<4.48.0" \
         "s3tokenizer>=0.3.0" && \
     rm -rf /root/.cache/pip
 
-# Verify backends
-RUN echo "Backends:" && ls -1 /opt/tritonserver/backends/
+# Verify required backends are present
+RUN echo "=== Verifying backends ===" && \
+    ls -1 /opt/tritonserver/backends/ && \
+    echo "" && \
+    echo "Checking ONNX Runtime backend..." && \
+    test -d /opt/tritonserver/backends/onnxruntime && \
+    ls -la /opt/tritonserver/backends/onnxruntime/ && \
+    echo "" && \
+    echo "Checking vLLM backend..." && \
+    test -d /opt/tritonserver/backends/vllm && \
+    ls -la /opt/tritonserver/backends/vllm/ && \
+    echo "" && \
+    echo "=== All required backends present ==="
