@@ -18,7 +18,8 @@
 FROM nvcr.io/nvidia/tritonserver:25.12-vllm-python-py3
 
 # Add ONNX Runtime backend for TTS and ASR models
-COPY --from=nvcr.io/nvidia/tritonserver:25.12-onnxruntime-python-py3 \
+# Copy from the base py3 image which includes all backends
+COPY --from=nvcr.io/nvidia/tritonserver:25.12-py3 \
     /opt/tritonserver/backends/onnxruntime \
     /opt/tritonserver/backends/onnxruntime
 
