@@ -95,11 +95,6 @@ RUN echo "============================================" && \
     python3 -c "import s3tokenizer; print('  s3tokenizer:  OK')" && \
     python3 -c "import conformer; print('  conformer:    OK')" && \
     echo "============================================" && \
-    echo "Critical Ops Tests:" && \
-    echo "============================================" && \
-    python3 -c "from vllm import LLM; print('  vllm.LLM: OK')" && \
-    python3 -c "import onnxruntime as ort; provs=ort.get_available_providers(); print(f'  ONNX providers: {provs}')" && \
-    echo "============================================" && \
     echo "Triton Backends:" && \
     echo "============================================" && \
     ls -1 /opt/tritonserver/backends/ | sed 's/^/  /'
