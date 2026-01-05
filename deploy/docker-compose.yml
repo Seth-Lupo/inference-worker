@@ -64,7 +64,8 @@ services:
       - ./models/parakeet_onnx/encoder-model.onnx:/models/asr/parakeet_encoder/1/encoder-model.onnx
       - ./models/parakeet_onnx/encoder-model.onnx.data:/models/asr/parakeet_encoder/1/encoder-model.onnx.data
       - ./models/parakeet_onnx/decoder_joint-model.onnx:/models/asr/parakeet_decoder/1/model.onnx
-      # vLLM model weights (downloaded from HuggingFace)
+      # vLLM model weights
+      - ./models/t3_weights:/models/t3_weights
       - ./models/qwen3_weights:/models/qwen3_weights
       # HuggingFace cache (fallback)
       - ${HF_HOME:-~/.cache/huggingface}:/root/.cache/huggingface

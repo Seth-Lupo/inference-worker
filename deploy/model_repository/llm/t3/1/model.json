@@ -1,5 +1,5 @@
 {
-    "model": "ResembleAI/chatterbox-turbo",
+    "model": "/models/t3_weights",
     "dtype": "float16",
     "tensor_parallel_size": 1,
     "gpu_memory_utilization": 0.25,
