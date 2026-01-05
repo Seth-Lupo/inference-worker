@@ -63,7 +63,7 @@ RUN TORCH_VERSION=$(python3 -c "import torch; v=torch.__version__.split('+')[0].
     pip install --no-cache-dir ninja && \
     git clone --depth 1 --branch $TV_VERSION https://github.com/pytorch/vision.git /tmp/vision && \
     cd /tmp/vision && \
-    TORCH_CUDA_ARCH_LIST="7.0;7.5;8.0;8.6;8.9;9.0" python setup.py install && \
+    TORCH_CUDA_ARCH_LIST="7.0;7.5;8.0;8.6;8.9;9.0" python3 setup.py install && \
     rm -rf /tmp/vision /root/.cache/pip
 
 # Verify torchvision works
@@ -126,6 +126,13 @@ RUN echo "============================================" && \
     python3 -c "import librosa; print(f'  librosa:      {librosa.__version__}')" && \
     python3 -c "import onnxruntime; print(f'  onnxruntime:  {onnxruntime.__version__}')" && \
     python3 -c "import s3tokenizer; print('  s3tokenizer:  OK')" && \
+    echo "============================================" && \
+    echo "Critical Ops Tests:" && \
+    echo "============================================" && \
+    python3 -c "from torchvision.ops import nms; print('  torchvision.ops.nms: OK')" && \
+    python3 -c "from diffusers.models.lora import LoRACompatibleLinear; print('  diffusers.models.lora: OK')" && \
+    python3 -c "from vllm import LLM; print('  vllm.LLM: OK')" && \
+    python3 -c "import onnxruntime as ort; provs=ort.get_available_providers(); print(f'  ONNX providers: {provs}')" && \
     echo "============================================" && \
     echo "Triton Backends:" && \
     echo "============================================" && \
