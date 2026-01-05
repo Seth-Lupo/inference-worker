@@ -5,18 +5,18 @@
 
 name: "parakeet_decoder"
 platform: "onnxruntime_onnx"
-max_batch_size: 1
+max_batch_size: 0
 
 input [
   {
     name: "encoder_outputs"
-    data_type: TYPE_FP16
-    dims: [ 512, 1 ]
+    data_type: TYPE_FP32
+    dims: [ 1, 512, 1 ]
   },
   {
     name: "targets"
     data_type: TYPE_INT64
-    dims: [ 1 ]
+    dims: [ 1, 1 ]
   },
   {
     name: "target_length"
@@ -25,12 +25,12 @@ input [
   },
   {
     name: "input_states_1"
-    data_type: TYPE_FP16
+    data_type: TYPE_FP32
     dims: [ 2, 1, 640 ]
   },
   {
     name: "input_states_2"
-    data_type: TYPE_FP16
+    data_type: TYPE_FP32
     dims: [ 2, 1, 640 ]
   }
 ]
@@ -38,17 +38,17 @@ input [
 output [
   {
     name: "outputs"
-    data_type: TYPE_FP16
-    dims: [ 1, 1025 ]
+    data_type: TYPE_FP32
+    dims: [ 1, 1, 1025 ]
   },
   {
     name: "output_states_1"
-    data_type: TYPE_FP16
+    data_type: TYPE_FP32
     dims: [ 2, 1, 640 ]
   },
   {
     name: "output_states_2"
-    data_type: TYPE_FP16
+    data_type: TYPE_FP32
     dims: [ 2, 1, 640 ]
   }
 ]

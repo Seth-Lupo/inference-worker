@@ -60,9 +60,9 @@ services:
       - ./models/chatterbox_onnx/speech_encoder_fp16.onnx_data:/models/tts/speech_encoder/1/speech_encoder_fp16.onnx_data:ro
       - ./models/chatterbox_onnx/conditional_decoder_fp16.onnx:/models/tts/conditional_decoder/1/conditional_decoder_fp16.onnx:ro
       - ./models/chatterbox_onnx/conditional_decoder_fp16.onnx_data:/models/tts/conditional_decoder/1/conditional_decoder_fp16.onnx_data:ro
-      # Parakeet ASR ONNX models (encoder has external data file)
-      - ./models/parakeet_onnx/encoder-model.onnx:/models/asr/parakeet_encoder/1/model.onnx:ro
-      - ./models/parakeet_onnx/encoder-model.onnx.data:/models/asr/parakeet_encoder/1/model.onnx.data:ro
+      # Parakeet ASR ONNX models (keep original names for external data references)
+      - ./models/parakeet_onnx/encoder-model.onnx:/models/asr/parakeet_encoder/1/encoder-model.onnx:ro
+      - ./models/parakeet_onnx/encoder-model.onnx.data:/models/asr/parakeet_encoder/1/encoder-model.onnx.data:ro
       - ./models/parakeet_onnx/decoder_joint-model.onnx:/models/asr/parakeet_decoder/1/model.onnx:ro
       # vLLM model weights
       - ./models/t3_weights:/models/t3_weights:ro

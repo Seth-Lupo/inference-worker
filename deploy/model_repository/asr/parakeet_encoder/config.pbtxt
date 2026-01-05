@@ -4,13 +4,16 @@
 
 name: "parakeet_encoder"
 platform: "onnxruntime_onnx"
-max_batch_size: 8
+max_batch_size: 0
+
+# Use original filename to match external data file reference
+default_model_filename: "encoder-model.onnx"
 
 input [
   {
     name: "audio_signal"
-    data_type: TYPE_FP16
-    dims: [ 128, -1 ]
+    data_type: TYPE_FP32
+    dims: [ 1, 128, -1 ]
   },
   {
     name: "length"
@@ -22,8 +25,8 @@ input [
 output [
   {
     name: "outputs"
-    data_type: TYPE_FP16
-    dims: [ -1, 512 ]
+    data_type: TYPE_FP32
+    dims: [ 1, -1, 512 ]
   },
   {
     name: "outputs_length"
