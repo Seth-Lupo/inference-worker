@@ -5,8 +5,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from conformer import ConformerBlock
-from diffusers.models.activations import get_activation
 from einops import pack, rearrange, repeat
+
+# Use local implementation to avoid torchvision dependency from diffusers
+from .diffusers_compat import get_activation
 
 from .transformer import BasicTransformerBlock
 
