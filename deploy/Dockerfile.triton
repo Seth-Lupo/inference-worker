@@ -35,9 +35,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Python Dependencies
 # ============================================================================
 
-# Fix numpy metadata and freeze core packages to prevent version conflicts
-RUN pip install --no-cache-dir --force-reinstall numpy && \
-    pip freeze | grep -E "^(torch|nvidia|numpy|numba|llvmlite)" > /tmp/frozen.txt && \
+# Freeze torch/nvidia packages only (numpy/numba have metadata conflicts in base image)
+RUN pip freeze | grep -E "^(torch|nvidia)" > /tmp/frozen.txt && \
     cat /tmp/frozen.txt
 
 # Triton client for BLS (Python backend calling other Triton models)
@@ -47,15 +46,14 @@ RUN pip install --no-cache-dir tritonclient[grpc]
 # (s3tokenizer registers model_type="aimv2", conflicts with transformers 4.48+)
 RUN pip install --no-cache-dir -c /tmp/frozen.txt "transformers>=4.45.0,<4.48.0"
 
-# Audio processing (pin numba>=0.63 to prevent downgrade)
-RUN pip install --no-cache-dir -c /tmp/frozen.txt \
-        "numba>=0.63.0" \
+# Audio processing (use --upgrade-strategy only-if-needed to keep base versions)
+RUN pip install --no-cache-dir --upgrade-strategy only-if-needed \
         librosa \
         soundfile \
         scipy
 
 # Chatterbox/S3Gen dependencies
-RUN pip install --no-cache-dir -c /tmp/frozen.txt \
+RUN pip install --no-cache-dir --upgrade-strategy only-if-needed \
         omegaconf \
         einops \
         conformer \
@@ -63,7 +61,7 @@ RUN pip install --no-cache-dir -c /tmp/frozen.txt \
         "s3tokenizer>=0.3.0"
 
 # Parakeet ASR (ONNX Runtime GPU)
-RUN pip install --no-cache-dir -c /tmp/frozen.txt onnxruntime-gpu
+RUN pip install --no-cache-dir --upgrade-strategy only-if-needed onnxruntime-gpu
 
 # Quantized model support (GPTQ, AWQ)
 RUN pip install --no-cache-dir compressed-tensors
