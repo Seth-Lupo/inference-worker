@@ -17,14 +17,33 @@
 
 FROM nvcr.io/nvidia/tritonserver:25.12-vllm-python-py3
 
-# Add ONNX Runtime backend for TTS and ASR models
-# Copy from the base py3 image which includes all backends
-COPY --from=nvcr.io/nvidia/tritonserver:25.12-py3 \
-    /opt/tritonserver/backends/onnxruntime \
-    /opt/tritonserver/backends/onnxruntime
-
 # Environment
 ENV VLLM_USE_V1=0
+
+# Build ONNX Runtime backend from source
+# Based on: https://github.com/triton-inference-server/onnxruntime_backend
+ARG ONNXRUNTIME_VERSION=1.21.0
+ARG TRITON_CONTAINER_VERSION=25.12
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        cmake \
+        rapidjson-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Clone and build ONNX Runtime backend
+RUN git clone --depth 1 --branch r${TRITON_CONTAINER_VERSION} \
+        https://github.com/triton-inference-server/onnxruntime_backend.git \
+        /tmp/onnxruntime_backend && \
+    mkdir -p /tmp/onnxruntime_backend/build && \
+    cd /tmp/onnxruntime_backend/build && \
+    cmake -DCMAKE_INSTALL_PREFIX:PATH=/opt/tritonserver \
+          -DTRITON_BUILD_ONNXRUNTIME_VERSION=${ONNXRUNTIME_VERSION} \
+          -DTRITON_BUILD_CONTAINER_VERSION=${TRITON_CONTAINER_VERSION} \
+          -DTRITON_ENABLE_GPU=ON \
+          -DTRITON_ENABLE_ONNXRUNTIME_TENSORRT=OFF \
+          .. && \
+    make -j$(nproc) install && \
+    rm -rf /tmp/onnxruntime_backend
 
 # Minimal dependencies for vLLM custom models (T3)
 RUN pip install --no-cache-dir --upgrade-strategy only-if-needed \
