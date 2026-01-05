@@ -56,17 +56,17 @@ services:
       - ./model_repository/tts:/models/tts
       - ./model_repository/asr:/models/asr
       # Chatterbox TTS ONNX models (keep original filenames for external data references)
-      - ./models/chatterbox_onnx/speech_encoder_fp16.onnx:/models/tts/speech_encoder/1/speech_encoder_fp16.onnx:ro
-      - ./models/chatterbox_onnx/speech_encoder_fp16.onnx_data:/models/tts/speech_encoder/1/speech_encoder_fp16.onnx_data:ro
-      - ./models/chatterbox_onnx/conditional_decoder_fp16.onnx:/models/tts/conditional_decoder/1/conditional_decoder_fp16.onnx:ro
-      - ./models/chatterbox_onnx/conditional_decoder_fp16.onnx_data:/models/tts/conditional_decoder/1/conditional_decoder_fp16.onnx_data:ro
+      - ./models/chatterbox_onnx/speech_encoder_fp16.onnx:/models/tts/speech_encoder/1/speech_encoder_fp16.onnx
+      - ./models/chatterbox_onnx/speech_encoder_fp16.onnx_data:/models/tts/speech_encoder/1/speech_encoder_fp16.onnx_data
+      - ./models/chatterbox_onnx/conditional_decoder_fp16.onnx:/models/tts/conditional_decoder/1/conditional_decoder_fp16.onnx
+      - ./models/chatterbox_onnx/conditional_decoder_fp16.onnx_data:/models/tts/conditional_decoder/1/conditional_decoder_fp16.onnx_data
       # Parakeet ASR ONNX models (keep original names for external data references)
-      - ./models/parakeet_onnx/encoder-model.onnx:/models/asr/parakeet_encoder/1/encoder-model.onnx:ro
-      - ./models/parakeet_onnx/encoder-model.onnx.data:/models/asr/parakeet_encoder/1/encoder-model.onnx.data:ro
-      - ./models/parakeet_onnx/decoder_joint-model.onnx:/models/asr/parakeet_decoder/1/model.onnx:ro
-      # vLLM model weights
-      - ./models/t3_weights:/models/t3_weights:ro
-      - ./models/qwen3_weights:/models/qwen3_weights:ro
+      - ./models/parakeet_onnx/encoder-model.onnx:/models/asr/parakeet_encoder/1/encoder-model.onnx
+      - ./models/parakeet_onnx/encoder-model.onnx.data:/models/asr/parakeet_encoder/1/encoder-model.onnx.data
+      - ./models/parakeet_onnx/decoder_joint-model.onnx:/models/asr/parakeet_decoder/1/model.onnx
+      # vLLM model weights (t3 needs write access for dynamic module caching)
+      - ./models/t3_weights:/models/t3_weights
+      - ./models/qwen3_weights:/models/qwen3_weights
       # HuggingFace cache (fallback)
       - ${HF_HOME:-~/.cache/huggingface}:/root/.cache/huggingface
       # Logs
