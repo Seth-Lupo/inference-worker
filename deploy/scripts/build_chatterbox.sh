@@ -163,6 +163,29 @@ EOF
         log_info "Created tokenizer_config.json"
     fi
 
+    # Copy modules directory if it exists
+    if [[ -d "${WORK_DIR}/chatterbox/modules" ]]; then
+        cp -r "${WORK_DIR}/chatterbox/modules" "${T3_WEIGHTS_DIR}/"
+        log_info "Copied modules directory"
+    elif [[ -d "${WORK_DIR}/chatterbox-turbo/modules" ]]; then
+        cp -r "${WORK_DIR}/chatterbox-turbo/modules" "${T3_WEIGHTS_DIR}/"
+        log_info "Copied modules directory from chatterbox-turbo"
+    fi
+
+    # Create flat-named symlinks for vLLM dynamic module loading
+    # vLLM looks for "modules.cond_enc.py" instead of "modules/cond_enc.py"
+    if [[ -d "${T3_WEIGHTS_DIR}/modules" ]]; then
+        log_info "Creating flat module symlinks for vLLM..."
+        for f in "${T3_WEIGHTS_DIR}/modules"/*.py; do
+            if [[ -f "$f" ]]; then
+                local basename=$(basename "$f")
+                local linkname="modules.${basename}"
+                ln -sf "modules/${basename}" "${T3_WEIGHTS_DIR}/${linkname}"
+                log_info "  ✓ ${linkname} -> modules/${basename}"
+            fi
+        done
+    fi
+
     # Verify required files
     log_info "Verifying T3 model files..."
     local required=("t3_cfg.safetensors" "tokenizer.json" "config.json" "modeling_t3.py" "configuration_t3.py" "entokenizer.py")
@@ -180,6 +203,13 @@ EOF
         log_error "Missing ${missing} required T3 files"
         log_error "T3 model code files may need to be copied manually"
         return 1
+    fi
+
+    # Verify modules
+    if [[ -d "${T3_WEIGHTS_DIR}/modules" ]]; then
+        log_info "  ✓ modules/ directory"
+    else
+        log_warn "  ✗ modules/ directory MISSING"
     fi
 
     log_info "T3 model ready at: ${T3_WEIGHTS_DIR}"
