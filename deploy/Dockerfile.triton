@@ -15,23 +15,16 @@
 #
 # =============================================================================
 
-# Start with full py3 image (has ONNX Runtime + other backends)
-FROM nvcr.io/nvidia/tritonserver:25.12-py3
+# Start with vLLM image (has vLLM backend + compatible Python packages)
+FROM nvcr.io/nvidia/tritonserver:25.12-vllm-python-py3
 
-# Copy vLLM backend from vLLM-specific image
-COPY --from=nvcr.io/nvidia/tritonserver:25.12-vllm-python-py3 \
-    /opt/tritonserver/backends/vllm \
-    /opt/tritonserver/backends/vllm
+# Copy ONNX Runtime backend from py3 image
+COPY --from=nvcr.io/nvidia/tritonserver:25.12-py3 \
+    /opt/tritonserver/backends/onnxruntime \
+    /opt/tritonserver/backends/onnxruntime
 
 # Environment
 ENV VLLM_USE_V1=0
-
-# Install vLLM and dependencies (same as vllm image)
-RUN pip install --no-cache-dir --upgrade-strategy only-if-needed \
-        vllm \
-        "transformers>=4.45.0,<4.48.0" \
-        "s3tokenizer>=0.3.0" && \
-    rm -rf /root/.cache/pip
 
 # Verify required backends are present
 RUN echo "=== Verifying backends ===" && \
