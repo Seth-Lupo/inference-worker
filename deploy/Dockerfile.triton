@@ -49,17 +49,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # =============================================================================
 
 # Get torch version to determine matching torchvision branch
+# torch 2.9 is very new - use main branch for latest compatibility
 RUN TORCH_VERSION=$(python3 -c "import torch; v=torch.__version__.split('+')[0].split('.')[:2]; print(f'{v[0]}.{v[1]}')") && \
     echo "Torch version: $TORCH_VERSION" && \
     # Map torch version to torchvision version
     case "$TORCH_VERSION" in \
+        "2.9") TV_VERSION="main" ;; \
+        "2.8") TV_VERSION="main" ;; \
+        "2.7") TV_VERSION="v0.22.0" ;; \
         "2.6") TV_VERSION="v0.21.0" ;; \
         "2.5") TV_VERSION="v0.20.1" ;; \
         "2.4") TV_VERSION="v0.19.1" ;; \
-        "2.3") TV_VERSION="v0.18.1" ;; \
-        *) TV_VERSION="v0.20.1" ;; \
+        *) TV_VERSION="main" ;; \
     esac && \
-    echo "Installing torchvision $TV_VERSION" && \
+    echo "Installing torchvision $TV_VERSION for torch $TORCH_VERSION" && \
     pip install --no-cache-dir ninja && \
     git clone --depth 1 --branch $TV_VERSION https://github.com/pytorch/vision.git /tmp/vision && \
     cd /tmp/vision && \
