@@ -1,13 +1,12 @@
 {
     "model": "/models/t3_weights",
-    "tokenizer": "EnTokenizer",
-    "tokenizer_mode": "custom",
     "trust_remote_code": true,
-    "dtype": "bfloat16",
+    "dtype": "float16",
     "tensor_parallel_size": 1,
-    "gpu_memory_utilization": 0.20,
+    "gpu_memory_utilization": 0.25,
     "max_model_len": 2048,
     "enforce_eager": true,
     "disable_log_stats": false,
-    "disable_log_requests": true
+    "disable_log_requests": true,
+    "skip_tokenizer_init": true
 }
