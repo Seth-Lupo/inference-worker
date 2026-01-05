@@ -10,11 +10,8 @@ from diffusers.models.attention import (
     ApproximateGELU,
 )
 from diffusers.models.attention_processor import Attention
+from diffusers.models.lora import LoRACompatibleLinear
 from diffusers.utils.torch_utils import maybe_allow_in_graph
-
-# Use nn.Linear instead of LoRACompatibleLinear to avoid torchvision import chain
-# (diffusers.models.lora -> transformers.models.clip -> torchvision::nms)
-LoRACompatibleLinear = nn.Linear
 
 
 class SnakeBeta(nn.Module):
